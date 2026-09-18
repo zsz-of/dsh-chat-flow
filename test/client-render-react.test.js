@@ -185,8 +185,8 @@ test('SSR：任务状态与「正在处理」统计随节点数据变化', (t) =
   )
   assert.match(html, /data-status="completed"/)
   assert.match(html, /2 项 · 2 已完成/)
-  // 任务A 的明细条数 = pwsh + write + mcp + 计划更新 = 4。
-  assert.match(html, /4 个操作/)
+  // 第一个分段（任务A）的明细条数 = pwsh + write + mcp = 3。
+  assert.match(html, /3 个操作/)
   // 任务已完成 → 行与「正在处理」都**默认自动折叠**。
   assert.match(html, /<div class="dcf-fold" data-open="false">/)
   // 明细内容仍挂在 DOM 里（这是折叠动画与嵌套展开状态得以保留的前提），
@@ -233,8 +233,9 @@ test('SSR：进行中的任务与「正在处理」默认展开，全部完成�
     { session: { running: false } },
   )
   assert.match(done, /data-status="completed"/)
-  assert.doesNotMatch(done, /aria-expanded="true"/, '全部完成后不应还有默认展开的块')
-  assert.doesNotMatch(done, /data-open="true"/)
+  // 最后一块快照面板默认展开（读者关心当前进度），但**没有任何任务折叠体**是展开的。
+  assert.equal((done.match(/class="dcf-taskrow" data-status="in_progress" aria-expanded="true"/g) ?? []).length, 0)
+  assert.equal((done.match(/data-open="true"/g) ?? []).length, 1, '只有最后一块快照面板是展开的')
 })
 
 test('SSR：每个回合都带跳转锚点，多于一个回合时渲染右侧导轨', (t) => {
@@ -312,5 +313,5 @@ test('SSR：展开态用真实 primitives 渲染出工具明细（不崩、看�
   assert.match(html, /data-terminal/, '命令明细应该由真实的 TerminalBlock 渲染')
   assert.match(html, /node --test/)
   assert.match(html, /all green/)
-  assert.match(html, /正在处理/)
+  assert.match(html, /思考完成/)
 })

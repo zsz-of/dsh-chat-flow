@@ -85,7 +85,7 @@ test('apply() 注册语言包、样式与唯一的视图条目', () => {
   const { captured, view, t } = bootView()
 
   assert.deepEqual(captured.locales.map((item) => item.ns), ['chat-flow'])
-  assert.equal(captured.locales[0].dict.zh['flow.processing'], '正在处理')
+  assert.equal(captured.locales[0].dict.zh['flow.thinking.live'], '思考中')
   assert.equal(captured.effects.length, 1, '语言包注册应挂在 effect 上，随插件卸载回收')
 
   assert.equal(appendedStyles.length, 1, '样式只注入一次（按固定 id 去重）')
@@ -215,18 +215,18 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
     useSession: () => ({ hasMore: false, running: true }),
   }
   const before = view.component(props)
-  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'false'])
+  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'false'], '唯一一块快照面板展开、任务行展开、「思考」块展开，卡片明细收起')
 
   // 点「正在处理」那一行 → 收起它。
   const procRow = findElement(
     before,
-    (element) => element.props?.className === 'dcf-row' && collectText(element).includes('正在处理'),
+    (element) => String(element.props?.className ?? '').includes('dcf-row') && collectText(element).includes('思考'),
   )
-  assert.ok(procRow !== undefined && typeof procRow.props.onClick === 'function', '「正在处理」行应当可点')
+  assert.ok(procRow !== undefined && typeof procRow.props.onClick === 'function', '「思考」标题行应当可点')
   procRow.props.onClick()
 
   const after = view.component({ ...props, t })
-  assert.deepEqual(foldStates(after), ['true', 'true', 'false', 'false'], '手动收起后应保持收起（已写进折叠状态）')
+  assert.deepEqual(foldStates(after), ['true', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
 })
 
 test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {

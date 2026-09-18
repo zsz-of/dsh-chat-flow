@@ -59,31 +59,71 @@ export function assistantNode(key, turn, step, blocks) {
 /**
  * 工具调用节点。
  *
- * @param result - 省略表示「还在跑」；给出 `{content, isError}` 表示已落定
- *   （核心在落定时把 `root` 换成 `{kind:'tool-result', call:{name,argsRaw}, …}`）。
+ * @param result - 省略表示「还在跑」；给出对象表示已落定，支持
+ *   `{content, isError, error, meta, parentCallId}`：
+ *   - `error` 是宿主的 `{name, code}` 形状（客户端据此判定「已取消」等状态）；
+ *   - `parentCallId` 表示这是嵌套子调用（子结果没有 meta/error）。
  */
 export function toolNode(key, turn, step, name, args, result) {
   const argsRaw = JSON.stringify(args)
-  const root =
-    result === undefined
-      ? { callId: key, name, argsRaw, turn, step, time: 0, subCalls: [] }
-      : {
-          kind: 'tool-result',
-          seq: 100,
-          time: 0,
-          callId: key,
-          call: { name, argsRaw },
-          callTime: 0,
-          content: [{ type: 'text', text: result.content ?? '' }],
-          isError: result.isError === true,
-          subCalls: [],
-        }
+  let root
+  if (result === undefined) {
+    root = { callId: key, name, argsRaw, turn, step, time: 0, subCalls: [] }
+  } else {
+    root = {
+      kind: 'tool-result',
+      seq: 100,
+      time: 0,
+      callId: key,
+      call: { name, argsRaw },
+      callTime: 0,
+      content: [{ type: 'text', text: result.content ?? '' }],
+      isError: result.isError === true,
+      subCalls: [],
+    }
+    if (result.error !== undefined) root.error = result.error
+    if (result.meta !== undefined) root.meta = result.meta
+    if (result.parentCallId !== undefined) root.parentCallId = result.parentCallId
+  }
   return envelope(key, turn, step, 'tool-call', { root })
 }
 
-/** `pwsh` 工具调用节点（最常用的动作类工具）。 */
-export function pwshNode(key, turn, step, command, output = 'ok') {
-  return toolNode(key, turn, step, 'pwsh', { command }, { content: output })
+/** `pwsh` 工具调用节点：按宿主真实格式写入退出码标记。 */
+export function pwshNode(key, turn, step, command, output = 'ok', exitCode = 0) {
+  const tail = exitCode === 0 ? '' : `\n[exit code: ${exitCode}]`
+  return toolNode(key, turn, step, 'pwsh', { command }, { content: `${output}${tail}` })
+}
+
+/** 被中断的命令（客户端把中断合成为 `error.code = 'interrupted'`，结果文本为空）。 */
+export function interruptedPwshNode(key, turn, step, command) {
+  return toolNode(key, turn, step, 'pwsh', { command }, {
+    content: '',
+    isError: true,
+    error: { name: 'Interrupted', code: 'interrupted' },
+  })
+}
+
+/** `edit` 工具调用节点（用于验证 `−N/+N`）。 */
+export function editNode(key, turn, step, path, oldText, newText) {
+  return toolNode(key, turn, step, 'edit', { file_path: path, old_string: oldText, new_string: newText }, {
+    content: 'edited',
+  })
+}
+
+/** MCP 工具调用节点。 */
+export function mcpNode(key, turn, step, publicName, args, output = 'ok') {
+  return toolNode(key, turn, step, publicName, args, { content: output })
+}
+
+/** 提问工具调用节点：结果文本是 `JSON.stringify({answers})`。 */
+export function askNode(key, turn, step, questions, answers) {
+  const content = answers === undefined ? '' : JSON.stringify({ answers })
+  return toolNode(key, turn, step, 'ask_user_question', { questions }, { content })
+}
+
+/** 子 agent 工具调用节点。 */
+export function subagentCallNode(key, turn, step, prompt, output = '子 agent 的报告') {
+  return toolNode(key, turn, step, 'subagent', { prompt }, { content: output })
 }
 
 /** `write` 工具调用节点。 */

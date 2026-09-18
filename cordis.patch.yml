@@ -1,0 +1,9 @@
+# dsh-chat-flow bundle patch
+#
+# Mounted as a dsh.bundle.patch layer: installing this package into a profile
+# (and listing it in dsh.profile.bundles) inserts the single plugin row below.
+# The plugin needs no config: the output protocol text and the plan reminder
+# are built in, and the client half owns the whole conversation view.
+- insert:
+    - id: chat-flow
+      name: 'dsh-chat-flow'

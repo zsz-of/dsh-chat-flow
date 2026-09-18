@@ -113,14 +113,17 @@ export async function loadBundle(options = {}) {
   let registration
   const requested = []
 
-  defineGlobal('window', {
+  /* bundle 里的 `window` 是 `new Function` 的**形参**，不是 `globalThis.window`，
+     所以测试要改 `matchMedia` 之类的全局时必须拿到这一个对象本身（下面作为 `window` 返回）。 */
+  const windowObject = {
     __ModuleLoader__: {
       load(entry) {
         registration = entry
       },
     },
     localStorage: storage,
-  })
+  }
+  defineGlobal('window', windowObject)
   /* 极简 DOM：`getElementById` 认识 `head.appendChild` 过的带 id 节点，
      这样「按 id 去重注入样式」这类行为能被真实断言，而不是永远返回 null。 */
   defineGlobal('document', {
@@ -146,7 +149,14 @@ export async function loadBundle(options = {}) {
     if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
     throw new Error(`测试未提供模块：${id}`)
   }
-  return { exports: registration.factory(requireImpl), registration, requested, appendedStyles, storage }
+  return {
+    exports: registration.factory(requireImpl),
+    registration,
+    requested,
+    appendedStyles,
+    storage,
+    window: windowObject,
+  }
 }
 
 /**

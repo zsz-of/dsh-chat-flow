@@ -119,8 +119,13 @@ before(async () => {
   }
 })
 
-/** 渲染主视图并拿到 HTML。 */
-function render(snapshot, sessionId = 'session-ssr') {
+/**
+ * 渲染主视图并拿到 HTML。
+ *
+ * @param snapshot - `useChat` 快照。
+ * @param options - `sessionId`、`session`（`useSession` 的返回值，决定 running/hasMore）。
+ */
+function render(snapshot, options = {}) {
   const t = (key, params) => {
     const template = internals.ZH[key] ?? key
     if (!params) return template
@@ -128,10 +133,10 @@ function render(snapshot, sessionId = 'session-ssr') {
   }
   return renderToString(
     internals.views.TaskFlowView({
-      sessionId,
+      sessionId: options.sessionId ?? 'session-ssr',
       t,
       useChat: (selector) => selector(snapshot),
-      useSession: () => ({ hasMore: false, loadingOlder: false }),
+      useSession: () => ({ hasMore: false, loadingOlder: false, running: false, ...(options.session ?? {}) }),
       loadOlder: () => {},
     }),
   )
@@ -180,11 +185,74 @@ test('SSR：任务状态与「正在处理」统计随节点数据变化', (t) =
   )
   assert.match(html, /data-status="completed"/)
   assert.match(html, /2 项 · 2 已完成/)
-  // 折叠态只显示统计，不泄露明细（命令名 / 文件路径都不该出现）。
   // 任务A 的明细条数 = pwsh + write + mcp + 计划更新 = 4。
   assert.match(html, /4 个操作/)
-  assert.doesNotMatch(html, /echo a/)
-  assert.doesNotMatch(html, /a\.js/)
+  // 任务已完成 → 行与「正在处理」都**默认自动折叠**。
+  assert.match(html, /<div class="dcf-fold" data-open="false">/)
+  // 明细内容仍挂在 DOM 里（这是折叠动画与嵌套展开状态得以保留的前提），
+  // 但 CSS 用 `grid-template-rows:0fr` + `visibility:hidden` 让它不可见也不可聚焦
+  // （真实可见性由 client-bundle.test.js 的样式契约测试保证）。
+  assert.match(html, /echo a/)
+})
+
+test('SSR：进行中的任务与「正在处理」默认展开，全部完成后自动折叠', (t) => {
+  if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
+  const unfinished = makeSnapshot([
+    userNode('u1', 1, '干活'),
+    todoNode('p1', 1, 1, [
+      { content: '任务A', status: 'in_progress' },
+      { content: '任务B', status: 'pending' },
+    ]),
+    pwshNode('t1', 1, 2, 'echo a', 'a'),
+  ])
+  // 会话正在跑：进行中的任务行与其「正在处理」都默认展开。
+  const live = render(unfinished, { session: { running: true } })
+  assert.match(live, /data-status="in_progress"/)
+  assert.match(live, /aria-expanded="true"/, '进行中的任务行应展开')
+  assert.match(live, /<div class="dcf-fold" data-open="true">/)
+
+  // 回合结束但任务仍未完成：仍然保持展开——「进行中」是按任务状态判定的，不是按回合。
+  const settledButUnfinished = render(unfinished, { session: { running: false } })
+  assert.match(settledButUnfinished, /data-status="in_progress"/)
+  assert.match(settledButUnfinished, /aria-expanded="true"/)
+
+  // 全部完成后：任务行与「正在处理」都自动收起。
+  const done = render(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [
+        { content: '任务A', status: 'in_progress' },
+        { content: '任务B', status: 'pending' },
+      ]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      todoNode('p2', 1, 3, [
+        { content: '任务A', status: 'completed' },
+        { content: '任务B', status: 'completed' },
+      ]),
+    ]),
+    { session: { running: false } },
+  )
+  assert.match(done, /data-status="completed"/)
+  assert.doesNotMatch(done, /aria-expanded="true"/, '全部完成后不应还有默认展开的块')
+  assert.doesNotMatch(done, /data-open="true"/)
+})
+
+test('SSR：每个回合都带跳转锚点，多于一个回合时渲染右侧导轨', (t) => {
+  if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
+  const oneTurn = render(makeSnapshot([userNode('u1', 1, '第一件事')]))
+  assert.match(oneTurn, /data-turn-anchor="1"/)
+  // 只有一个回合时导轨没有意义，不渲染。
+  assert.doesNotMatch(oneTurn, /dcf-rail/)
+
+  const twoTurns = render(
+    makeSnapshot([userNode('u1', 1, '第一件事'), pwshNode('t1', 1, 1, 'echo 1'), userNode('u2', 2, '第二件事')]),
+  )
+  assert.match(twoTurns, /data-turn-anchor="1"/)
+  assert.match(twoTurns, /data-turn-anchor="2"/)
+  assert.match(twoTurns, /class="dcf-rail"/)
+  assert.equal((twoTurns.match(/class="dcf-mark"/g) ?? []).length, 2, '每个回合一个刻度')
+  assert.match(twoTurns, /aria-label="跳到第 1 轮"/)
+  assert.match(twoTurns, /aria-label="跳到第 2 轮"/)
 })
 
 test('SSR：内容按文本转义，不把模型输出当 HTML 注入', (t) => {

@@ -69,7 +69,7 @@ function bootView() {
 
 const module0 = await loadBundle()
 const client = module0.exports
-const { registration, requested, appendedStyles } = module0
+const { registration, requested, appendedStyles, window: window0 } = module0
 
 test('bundle 以正确的包名注册自己，且只依赖平台 seed 模块', () => {
   assert.equal(registration.id, 'dsh-chat-flow')
@@ -144,25 +144,120 @@ test('视图渲染：计划分组 / 任务列表 / 正在处理统计都在', ()
   assert.equal(captured.registered.length, 1)
 })
 
-test('折叠状态默认收起：任务子对话与「正在处理」都没展开', () => {
+/** 收集树里所有折叠容器的展开态（按出现顺序），用于断言默认展开策略。 */
+function foldStates(element) {
+  const states = []
+  const walk = (value) => {
+    if (value === null || value === undefined || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    if (value.props?.className === 'dcf-fold') states.push(value.props['data-open'])
+    walk(value.props?.children)
+  }
+  walk(element)
+  return states
+}
+
+/** 在树里找第一个满足条件的元素。 */
+function findElement(element, predicate) {
+  let found = null
+  const walk = (value) => {
+    if (found !== null || value === null || value === undefined || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    if (predicate(value)) {
+      found = value
+      return
+    }
+    walk(value.props?.children)
+  }
+  walk(element)
+  return found
+}
+
+test('默认展开策略：进行中的任务与其「正在处理」都展开，明细可见', () => {
   const { view, t } = bootView()
   const snapshot = makeSnapshot([
     userNode('u1', 1, '做点事'),
     todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
-    pwshNode('t1', 1, 2, 'secret-command', 'secret-output'),
+    pwshNode('t1', 1, 2, 'live-command', 'live-output'),
   ])
   const tree = view.component({
-    sessionId: 'session-2',
+    sessionId: 'session-live',
     t,
     useChat: (selector) => selector(snapshot),
-    useSession: () => ({ hasMore: false }),
+    useSession: () => ({ hasMore: false, running: true }),
   })
-  const text = collectText(tree)
-  assert.match(text, /任务A/)
-  assert.match(text, /进行中/)
-  // 默认收起：动作标题可见（「正在处理」在任务展开体里，因此这里连统计也不该出现）。
-  assert.doesNotMatch(text, /secret-command/)
-  assert.doesNotMatch(text, /secret-output/)
+  assert.match(collectText(tree), /任务A/)
+  assert.match(collectText(tree), /进行中/)
+  // 三个块在「进行中」时展开：规划过程 / 任务行 / 正在处理；
+  // 剩下那个收起的是**某条操作自己的明细**（一行一条之后还要再点才展开，这是刻意的）。
+  assert.deepEqual(foldStates(tree), ['true', 'true', 'true', 'false'])
+  assert.match(collectText(tree), /live-command/)
+})
+
+test('手动收起会被记住：覆盖默认展开策略', () => {
+  const { view, t } = bootView()
+  const sessionId = 'session-manual'
+  const snapshot = makeSnapshot([
+    userNode('u1', 1, '做点事'),
+    todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+    pwshNode('t1', 1, 2, 'live-command', 'live-output'),
+  ])
+  const props = {
+    sessionId,
+    t,
+    useChat: (selector) => selector(snapshot),
+    useSession: () => ({ hasMore: false, running: true }),
+  }
+  const before = view.component(props)
+  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'false'])
+
+  // 点「正在处理」那一行 → 收起它。
+  const procRow = findElement(
+    before,
+    (element) => element.props?.className === 'dcf-row' && collectText(element).includes('正在处理'),
+  )
+  assert.ok(procRow !== undefined && typeof procRow.props.onClick === 'function', '「正在处理」行应当可点')
+  procRow.props.onClick()
+
+  const after = view.component({ ...props, t })
+  assert.deepEqual(foldStates(after), ['true', 'true', 'false', 'false'], '手动收起后应保持收起（已写进折叠状态）')
+})
+
+test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {
+  const { jumpToTurn } = client.__internals
+  const calls = []
+  const target = { scrollIntoView: (options) => calls.push(options) }
+  const root = { querySelector: (selector) => (selector === '[data-turn-anchor="3"]' ? target : null) }
+
+  window0.matchMedia = () => ({ matches: true })
+  jumpToTurn(root, 3)
+  assert.deepEqual(calls, [{ block: 'start', behavior: 'auto' }], '开了减少动态效果就瞬时跳')
+
+  window0.matchMedia = () => ({ matches: false })
+  jumpToTurn(root, 3)
+  assert.deepEqual(calls[1], { block: 'start', behavior: 'smooth' })
+
+  // 目标不存在时不能抛（回合可能还没渲染，或者锚点刚好不在）。
+  assert.doesNotThrow(() => jumpToTurn(root, 99))
+  assert.doesNotThrow(() => jumpToTurn(null, 1))
+})
+
+test('样式契约：折叠有过渡且收起时不可见，并尊重 reduced-motion', () => {
+  const { FLOW_CSS } = client.__internals
+  assert.match(FLOW_CSS, /\.dcf-fold\{[^}]*grid-template-rows:0fr/, '收起态用 0fr 轨道')
+  assert.match(FLOW_CSS, /\.dcf-fold\{[^}]*visibility:hidden/, '收起态要摘掉可见性与焦点')
+  assert.match(FLOW_CSS, /\.dcf-fold\[data-open=true\]\{[^}]*grid-template-rows:1fr/)
+  assert.match(FLOW_CSS, /\.dcf-fold[^{]*\{[^}]*transition:grid-template-rows \.22s/)
+  assert.match(FLOW_CSS, /prefers-reduced-motion:reduce/, '必须给减少动态效果留出口')
+  // 导轨：sticky 零高槽 + 刻度用主题 token 上色。
+  assert.match(FLOW_CSS, /\.dcf-rail-slot\{position:sticky;top:0/)
+  assert.match(FLOW_CSS, /\.dcf-mark\[data-active=true\]::before\{background:var\(--dsw-alias-label-primary\)/)
 })
 
 test('缺少 useChat（ui-chat 不在装配里）时给空态而不是抛异常', () => {

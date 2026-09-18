@@ -10,11 +10,35 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { createRequire } from 'node:module'
+import { createRequire, register } from 'node:module'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { before, test } from 'node:test'
 
-import { loadBundle } from './helpers/load-bundle.mjs'
+import { createStorage, loadBundle } from './helpers/load-bundle.mjs'
+
+/**
+ * 让 Node 能导入 primitives 的真实 ESM 产物：它内部 `import ... from './X.module.css'`，
+ * 而 Node 不认识 `.css`（`Unknown file extension ".css"`）。这里注册一个模块钩子，
+ * 把所有 `.css` 换成一个「取任何键都得类名」的假模块——样式对断言无意义，
+ * 但**真实组件本体**（`TerminalBlock` / `MarkdownText` / `JsonBlock`）必须是真的。
+ *
+ * `register` 是进程级的，而 `node --test` 每个测试文件一个进程，因此不会污染别的文件。
+ */
+register(
+  `data:text/javascript,${encodeURIComponent(`
+export async function load(url, context, nextLoad) {
+  if (url.endsWith('.css')) {
+    return {
+      format: 'module',
+      shortCircuit: true,
+      source: 'export default new Proxy({}, { get: (_t, key) => "css-" + String(key) })',
+    }
+  }
+  return nextLoad(url, context)
+}
+`)}`,
+)
 import {
   assistantNode,
   makeSnapshot,
@@ -39,6 +63,9 @@ function profileNodeModules() {
 let renderToString
 let internals
 let ready = false
+/** 真实 primitives 的装载结果：只有它能验证「展开态真的能渲染」。 */
+let realInternals
+let realReady = false
 
 before(async () => {
   const base = profileNodeModules()
@@ -67,6 +94,26 @@ before(async () => {
     const loaded = await loadBundle({ react: React, primitives })
     internals = loaded.exports.__internals
     ready = true
+
+    /**
+     * 第二遍装载：primitives 换成**真实模块**。
+     *
+     * 这一步专门验证展开态——`TerminalBlock` 之类的原子组件对入参有硬要求
+     * （例如 `command` 必须是字符串，内部直接 `.endsWith`），替身挡不住这类错误，
+     * 而真机上它会让整行工具明细渲染崩溃。真实模块同样从 profile 取，**单独 try** 以便
+     * 只有这一条用例跳过，而不是把整组拖下水。
+     */
+    try {
+      const primitivesUrl = pathToFileURL(
+        join(base, '@deepseek-ai', 'dsh-client-ui-primitives', 'lib', 'index.js'),
+      ).href
+      const realPrimitives = await import(primitivesUrl)
+      const realLoaded = await loadBundle({ react: React, primitives: realPrimitives })
+      realInternals = realLoaded.exports.__internals
+      realReady = true
+    } catch {
+      realReady = false
+    }
   } catch {
     ready = false
   }
@@ -157,4 +204,45 @@ test('SSR：空会话给出空态而不是空白', (t) => {
   if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
   const html = render(makeSnapshot([]))
   assert.match(html, /dcf-empty/)
+})
+
+test('SSR：展开态用真实 primitives 渲染出工具明细（不崩、看到命令与结果）', async (t) => {
+  if (!realReady) return t.skip('缺少 profile 里的 @deepseek-ai/dsh-client-ui-primitives')
+  const sessionId = 'ssr-expanded'
+  // 预置折叠状态：把任务行、它的「正在处理」块、以及那条命令明细全部打开。
+  const storage = createStorage()
+  storage.setItem(
+    `dsh-chat-flow.collapse.${sessionId}`,
+    JSON.stringify({ 'task:1:0': true, 'proc:1:0': true, 'op:t1': true }),
+  )
+  const loaded = await loadBundle({
+    react: createRequire(`${profileNodeModules().replace(/[\\/]+$/, '')}/`)('react'),
+    primitives: await import(
+      pathToFileURL(join(profileNodeModules(), '@deepseek-ai', 'dsh-client-ui-primitives', 'lib', 'index.js')).href
+    ),
+    storage,
+  })
+  const local = loaded.exports.__internals
+  const snapshot = makeSnapshot([
+    userNode('u1', 1, '跑测试'),
+    todoNode('p1', 1, 1, [{ content: '跑测试', status: 'in_progress' }]),
+    pwshNode('t1', 1, 2, 'node --test', 'ok 30 - all green'),
+  ])
+  const translate = (key, params) => {
+    const template = local.ZH[key] ?? key
+    if (!params) return template
+    return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
+  }
+  const html = renderToString(
+    local.views.TaskFlowView({
+      sessionId,
+      t: translate,
+      useChat: (selector) => selector(snapshot),
+      useSession: () => ({ hasMore: false }),
+    }),
+  )
+  assert.match(html, /data-terminal/, '命令明细应该由真实的 TerminalBlock 渲染')
+  assert.match(html, /node --test/)
+  assert.match(html, /all green/)
+  assert.match(html, /正在处理/)
 })

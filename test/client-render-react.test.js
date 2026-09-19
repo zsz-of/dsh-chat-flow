@@ -66,6 +66,8 @@ let ready = false
 /** 真实 primitives 的装载结果：只有它能验证「展开态真的能渲染」。 */
 let realInternals
 let realReady = false
+/** 每次渲染换一个会话 id：折叠状态按会话持久化，共用一个 id 会让用例互相污染。 */
+let ssrCounter = 0
 
 before(async () => {
   const base = profileNodeModules()
@@ -133,7 +135,7 @@ function render(snapshot, options = {}) {
   }
   return renderToString(
     internals.views.TaskFlowView({
-      sessionId: options.sessionId ?? 'session-ssr',
+      sessionId: options.sessionId ?? `ssr-${ssrCounter += 1}`,
       t,
       useChat: (selector) => selector(snapshot),
       useSession: () => ({ hasMore: false, loadingOlder: false, running: false, ...(options.session ?? {}) }),
@@ -236,7 +238,7 @@ test('SSR：进行中的任务与「正在处理」默认展开，全部完成�
   assert.match(done, /data-status="completed"/)
   // 最后一块快照面板默认展开（读者关心当前进度），但**没有任何任务折叠体**是展开的。
   assert.equal((done.match(/class="dcf-taskrow" data-status="in_progress" aria-expanded="true"/g) ?? []).length, 0)
-  assert.equal((done.match(/data-open="true"/g) ?? []).length, 1, '只有最后一块快照面板是展开的')
+  assert.equal((done.match(/class="dcf-fold" data-open="true"/g) ?? []).length, 1, '折叠块里只有最后一块快照面板是展开的（chevron 的 data-open 不算）')
 })
 
 test('SSR：每个回合都带跳转锚点，多于一个回合时渲染右侧导轨', (t) => {

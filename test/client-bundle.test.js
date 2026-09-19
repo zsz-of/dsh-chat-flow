@@ -92,9 +92,9 @@ test('apply() 注册语言包、样式与唯一的视图条目', () => {
   assert.match(appendedStyles[0].textContent, /\.dcf-root/)
 
   assert.ok(view !== undefined, '必须注册 conversation.view')
-  assert.equal(view.options.id, 'chat', '认领 id=chat 才能成为默认视图（fallback 硬编码为它）')
-  assert.equal(view.options.priority, -1, '同单元格上 priority 最小者渲染，-1 才能遮蔽核心条目')
-  assert.equal(view.options.order, 0)
+  assert.equal(view.options.id, 'flow', '用独立 id：遮蔽会让标签栏出现两个同 id 条目（核心不允许注销别人的条目）')
+  assert.equal(view.options.priority, undefined, '不设 priority：各占一个单元格，互不遮蔽')
+  assert.equal(view.options.order, 5, '排在「对话」(0) 与「轨迹」(10) 之间')
   assert.equal(view.options.locale, 'chat-flow')
   assert.equal(view.options.label(), '任务')
   assert.equal(t('flow.tasksSummary', { total: 2, done: 1 }), '2 项 · 1 已完成')
@@ -196,7 +196,7 @@ test('默认展开策略：进行中的任务与其「正在处理」都展开�
   assert.match(collectText(tree), /进行中/)
   // 三个块在「进行中」时展开：规划过程 / 任务行 / 正在处理；
   // 剩下那个收起的是**某条操作自己的明细**（一行一条之后还要再点才展开，这是刻意的）。
-  assert.deepEqual(foldStates(tree), ['true', 'true', 'true', 'false'])
+  assert.deepEqual(foldStates(tree), ['true', 'true', 'true', 'true', 'false'], '任务过程 / 快照面板 / 任务行 / 思考块展开，卡片明细收起')
   assert.match(collectText(tree), /live-command/)
 })
 
@@ -215,7 +215,7 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
     useSession: () => ({ hasMore: false, running: true }),
   }
   const before = view.component(props)
-  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'false'], '唯一一块快照面板展开、任务行展开、「思考」块展开，卡片明细收起')
+  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'true', 'false'], '任务过程 / 快照面板 / 任务行 / 思考块展开，卡片明细收起')
 
   // 点「正在处理」那一行 → 收起它。
   const procRow = findElement(
@@ -226,7 +226,7 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
   procRow.props.onClick()
 
   const after = view.component({ ...props, t })
-  assert.deepEqual(foldStates(after), ['true', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
+  assert.deepEqual(foldStates(after), ['true', 'true', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
 })
 
 test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {

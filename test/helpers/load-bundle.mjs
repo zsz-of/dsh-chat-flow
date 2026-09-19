@@ -48,16 +48,39 @@ export function createStorage({ fail = false } = {}) {
  * 这么做能在 node 里跑完整渲染而不需要 DOM，而且能抓到「组件是 undefined」这类错误
  * （真实 React 的表现是整块白屏，很难定位）。
  *
+ * 类组件（错误边界是唯一一种）必须真的被 `new` 出来再调 `render()`：本插件的原生座位外面
+ * 套着一个错误边界，替身若不支持类组件，整个 bundle 连装载都会失败。
+ * 替身**不模拟**错误边界语义（不会接住子树抛错）——那条路径交给真实 React 的 SSR 用例验证。
+ *
  * @returns React 替身。
  */
 export function createFakeReact() {
+  class Component {
+    constructor(props) {
+      this.props = props ?? {}
+      this.state = {}
+    }
+
+    setState(next) {
+      this.state = { ...this.state, ...(typeof next === 'function' ? next(this.state, this.props) : next) }
+    }
+
+    render() {
+      throw new Error('类组件必须实现 render')
+    }
+  }
+
   const react = {
+    Component,
     createElement(type, props, ...children) {
       if (type === undefined || type === null) throw new Error('createElement 收到了未定义的组件（拼写错误或未导出）')
       const merged = { ...(props ?? {}) }
       if (children.length === 1) merged.children = children[0]
       else if (children.length > 1) merged.children = children
-      if (typeof type === 'function') return type(merged)
+      if (typeof type === 'function') {
+        if (type.prototype instanceof Component) return new type(merged).render()
+        return type(merged)
+      }
       return { type, props: merged }
     },
     useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],

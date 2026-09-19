@@ -9,6 +9,7 @@ import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
 import { collectText, createStorage, loadBundle } from './helpers/load-bundle.mjs'
+import { createProbeReact } from './helpers/probe-react.mjs'
 import {
   assistantNode,
   makeSnapshot,
@@ -310,4 +311,295 @@ test('没有 turnOutline 时导轨退化成只画已加载回合', () => {
   })
   assert.equal(findElement(tree, (element) => element.props?.['data-loaded'] === 'false'), null)
   assert.equal(findElement(tree, (element) => element.props?.['data-loaded'] === 'true') !== undefined, true, '已加载刻度照常渲染')
+})
+
+/* ──────────────────────────── 原生节点座位 ──────────────────────────── */
+
+/** 记录每次原生座位调用，并按要求返回一个标记元素（默认是个纯标记，不含任何子节点）。 */
+function seatSpy(behaviour) {
+  const calls = []
+  const renderSlot = (slot, owner, options) => {
+    calls.push({ slot, owner, options })
+    return behaviour === undefined ? { type: 'native', props: { slot } } : behaviour(slot, owner, options)
+  }
+  return { calls, renderSlot }
+}
+
+test('原生座位：每个节点都经 conversation.chat.node 交给核心渲染，并带上主人参数', () => {
+  const { view, t } = bootView()
+  const { calls, renderSlot } = seatSpy()
+  const tool = pwshNode('t1', 1, 2, 'echo a', 'a')
+  const snapshot = makeSnapshot([
+    userNode('u1', 1, '干活'),
+    todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+    tool,
+  ])
+  const openFile = () => Promise.resolve()
+  const tree = view.component({
+    sessionId: 'session-seat',
+    t,
+    useChat: (selector) => selector(snapshot),
+    useSession: () => ({ hasMore: false, loadingOlder: false }),
+    renderSlot,
+    openFile,
+    openView: (id) => id,
+  })
+
+  assert.ok(calls.length >= 2, '用户发言与工具调用都应经过原生座位')
+  for (const call of calls) {
+    assert.equal(call.slot, client.__internals.NATIVE_NODE_SLOT)
+    assert.ok(call.owner.node !== undefined, '原生座位必须拿到该节点本身')
+    assert.equal(call.options.entryKey, call.owner.node.kind, 'entryKey 用节点 kind 分派原生条目')
+    assert.equal(call.owner.openFile, openFile, '核心叶子要的 openFile 必须原样传下去')
+    assert.equal(typeof call.owner.forkAt, 'function')
+    assert.equal(typeof call.owner.fileMentions, 'function')
+    assert.equal(typeof call.owner.inspectCall, 'function')
+    assert.ok(Object.hasOwn(call.options, 'hookContext'), 'hookContext 这个键必须存在（槽上挂着上下文 hook 工厂）')
+    assert.ok(call.options.fallback !== undefined && call.options.fallback !== null, '必须给核心一个回退叶子')
+  }
+  const toolCall = calls.find((call) => call.owner.node.kind === 'tool-call')
+  assert.equal(toolCall.owner.node, tool)
+  assert.equal(toolCall.options.entryKey, 'tool-call')
+  assert.equal(toolCall.owner.turnProcess, undefined, '核心的过程折叠控制器由本插件替代，不给它主人参数')
+  assert.equal(toolCall.owner.cwd, undefined, '没有 useSessions 时 cwd 留空')
+
+  // 原生座位接手后，本插件自己的卡片不再出现在这一行（只有回退叶子才用它）。
+  const nativeRows = []
+  findElement(tree, (element) => {
+    if (element.type === 'native') nativeRows.push(element)
+    return false
+  })
+  assert.equal(nativeRows.length, calls.length)
+  assert.equal(findElement(tree, (element) => element.props?.className === 'dcf-card'), null)
+})
+
+test('原生座位：cwd 来自 useSessions；装配里没有 renderSlot 时退回自绘叶子', () => {
+  const { view, t } = bootView()
+  const snapshot = makeSnapshot([userNode('u1', 1, '干活'), pwshNode('t1', 1, 1, 'echo a', 'a')])
+  const { calls, renderSlot } = seatSpy()
+  view.component({
+    sessionId: 'session-seat-cwd',
+    t,
+    useChat: (selector) => selector(snapshot),
+    useSession: () => ({ hasMore: false, loadingOlder: false }),
+    renderSlot,
+  })
+  assert.equal(calls[0].owner.cwd, undefined)
+
+  calls.length = 0
+  view.component({
+    sessionId: 'session-seat-cwd-2',
+    t,
+    useChat: (selector) => selector(snapshot),
+    useSession: () => ({ hasMore: false, loadingOlder: false }),
+    renderSlot,
+    useSessions: (selector) => selector({ byId: { 'session-seat-cwd-2': { cwd: 'D:/work' } } }),
+  })
+  assert.equal(calls[0].owner.cwd, 'D:/work')
+
+  // 没有 renderSlot（ui-chat 不在装配里）→ 一次座位都不调，直接画自绘卡片。
+  const plain = view.component({
+    sessionId: 'session-no-slot',
+    t,
+    useChat: (selector) => selector(snapshot),
+    useSession: () => ({ hasMore: false, loadingOlder: false }),
+  })
+  assert.notEqual(findElement(plain, (element) => element.props?.className === 'dcf-card'), null)
+  assert.equal(
+    calls.some((call) => call.owner.node.kind === 'tool-call'),
+    true,
+    '有 renderSlot 时工具调用必须走座位（自绘卡片只作为回退叶子）',
+  )
+})
+
+test('原生座位外面套着错误边界：失败时给出回退叶子，并且留日志', async () => {
+  /*
+    这一条需要「createElement 不立刻调用组件」的渲染器：手写渲染器会把类组件当场 new 出来，
+    拿不到边界元素本身。所以要单独用探针 React 装载一份 bundle（探针的 createElement 只构造元素）。
+  */
+  const probeModule = await loadBundle({ react: createProbeReact().react })
+  const { views } = probeModule.exports.__internals
+  const fallback = { type: 'leaf' }
+  const seated = { type: 'native' }
+  const node = { key: 't1', kind: 'tool-call' }
+  const boundary = views.NativeSeat({ node, owner: {}, renderSlot: () => seated, fallback })
+
+  assert.equal(typeof boundary.type.getDerivedStateFromError, 'function', '必须是类组件错误边界（函数组件不是边界）')
+  assert.equal(boundary.props.fallback, fallback, '边界拿到的回退叶子必须是本插件的自绘叶子')
+  assert.equal(boundary.props.children.props.node, node, '边界包住的正是真正调用插槽的那一层')
+  assert.equal(
+    views.NativeSeat({ node, owner: {}, renderSlot: undefined, fallback }),
+    fallback,
+    '没有 renderSlot（装配里没有 ui-chat）时不用套边界，直接给回退叶子',
+  )
+
+  /**
+   * React 的边界契约：崩溃时调 `getDerivedStateFromError`，随后用新状态重渲染。
+   * React 18 的 legacy `renderToString` **不**接住边界（实测：错误直接抛出；流式接口会把整条流中断），
+   * 所以这条契约在这里逐点断言；真机上的客户端渲染器（`createRoot`）支持它。
+   */
+  const Boundary = boundary.type
+  assert.deepEqual(Boundary.getDerivedStateFromError(new Error('x')), { failed: true })
+  const instance = new Boundary({ fallback, children: 'CHILD' })
+  assert.equal(instance.render(), 'CHILD', '正常时渲染子树')
+  instance.state = { failed: true }
+  assert.equal(instance.render(), fallback, '失败后渲染回退叶子')
+
+  const warnings = []
+  const originalWarn = console.warn
+  console.warn = (...args) => warnings.push(args)
+  try {
+    instance.componentDidCatch(new Error('native seat boom'))
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.equal(warnings.length, 1, '失败必须显式留日志，不能静默')
+  assert.match(String(warnings[0][0]), /原生节点座位渲染失败/)
+})
+
+test('原生座位：核心的收尾控制器节点（turn-tail / turn-process）不交给原生渲染', () => {
+  const { seatNodesOf } = client.__internals
+  const kept = seatNodesOf([
+    { key: 'a', kind: 'tool-call' },
+    { key: 'b', kind: 'turn-tail' },
+    { key: 'c', kind: 'turn-process' },
+    null,
+    undefined,
+    { key: 'd', kind: 'user' },
+  ])
+  assert.deepEqual(kept.map((node) => node.key), ['a', 'd'])
+})
+
+test('turnDataOfNode / turnOfChatNode：只有 turn 与 step 两种位置有回合数据', () => {
+  const { turnDataOfNode, turnOfChatNode } = client.__internals
+  const data = { source: () => undefined }
+  const node = { location: { kind: 'step', turn: { turn: 3, data } } }
+  assert.equal(turnDataOfNode(node), data, 'hookContext 必须就是 location.turn.data')
+  assert.equal(turnOfChatNode(node), 3)
+  assert.equal(turnDataOfNode({ location: { kind: 'unresolved' } }), undefined)
+  assert.equal(turnDataOfNode({}), undefined)
+  assert.equal(turnOfChatNode(undefined), undefined)
+})
+
+test('子槽声明：核心的两个子槽挂成不可枚举属性（冲突检查看不到、所有权检查读得到）', () => {
+  const { nativeViewChildren, NATIVE_NODE_SLOT, NATIVE_IMAGES_SLOT, OWN_SEAT_SLOT } = client.__internals
+  const children = nativeViewChildren()
+
+  // 核心 register() 的冲突检查遍历 `Object.keys(children)`（slots:100）——
+  // 核心 ui-chat 的视图条目已经声明过这两个槽，它们绝不能出现在可枚举键里。
+  assert.deepEqual(Object.keys(children), [OWN_SEAT_SLOT])
+  // renderSlot 的所有权检查只做属性读取（renderer:285）。
+  assert.equal(children[NATIVE_NODE_SLOT].kind, 'keyed')
+  assert.equal(children[NATIVE_NODE_SLOT].scope, 'session')
+  assert.equal(children[NATIVE_IMAGES_SLOT].kind, 'single')
+  // 渲染器用 `Object.values(children)` 判断要不要给 SessionProvider（renderer:616）：
+  // 会话作用域子槽必须出现在可枚举值里，否则原生座位会因为缺作用域绑定而抛 SlotAssemblyError。
+  assert.ok(Object.values(children).some((spec) => spec.scope === 'session'))
+  assert.equal(
+    Object.values(children).some((spec) => spec.kind === 'chain'),
+    false,
+    '不是 chain 槽，renderer:615 不必给 renderSlotChain',
+  )
+})
+
+test('接线：视图条目声明 children 并把原生叶子要的能力放进 inject', () => {
+  const { view } = bootView()
+  assert.deepEqual(Object.keys(view.options.children), ['chat-flow.seat'], '可枚举子槽只有本插件自己的那个')
+  assert.equal(view.options.children['conversation.chat.node'].kind, 'keyed')
+
+  const injected = view.options.inject('session-1')
+  assert.equal(typeof injected.openFile, 'function')
+  assert.equal(typeof injected.fileMentions, 'function')
+  assert.equal(typeof injected.forkAt, 'function')
+  // 桩 ctx 里没有 uiConversation → loadImage 降级为 undefined（原生叶子会跳过附件渲染）。
+  assert.equal(injected.loadImage, undefined)
+})
+
+/** 造一个带可选服务的 ctx 桩：验证原生注入面的能力与降级。 */
+function seatFaceStub(services) {
+  const calls = { opened: [], forked: [], openedPaths: [] }
+  const ctx = {
+    get: (name) => services[name],
+    sessions: {
+      list: { getSnapshot: () => ({ byId: { 'session-1': { cwd: 'D:/work' } } }) },
+      fork: (input) => {
+        calls.forked.push(input)
+        return Promise.resolve('child-1')
+      },
+      open: (id) => calls.opened.push(id),
+    },
+  }
+  return { ctx, calls }
+}
+
+test('原生注入面：openFile 按会话 cwd 解析相对路径，绝对路径原样使用', async () => {
+  const { nativeSeatFace, resolveSeatPath } = client.__internals
+  const { ctx, calls } = seatFaceStub({
+    remote: {
+      session: {
+        openWorkspacePath: (input) => {
+          calls.openedPaths.push(input.path)
+          return Promise.resolve({ ok: true })
+        },
+      },
+    },
+  })
+  const face = nativeSeatFace(ctx, 'session-1')
+  await face.openFile('src/a.js')
+  await face.openFile('/tmp/b.js')
+  await face.openFile('C:\\x\\c.js')
+  await face.openFile('\\\\server\\share\\d.js')
+  assert.deepEqual(calls.openedPaths, ['D:/work/src/a.js', '/tmp/b.js', 'C:\\x\\c.js', '\\\\server\\share\\d.js'])
+
+  // 路径解析与核心 `resolveWorkspacePath` 同义（util-workspace-path:16-20）。
+  assert.equal(resolveSeatPath('D:/work/', '/a'), '/a')
+  assert.equal(resolveSeatPath('D:/work/', 'a'), 'D:/work/a')
+  assert.equal(resolveSeatPath(undefined, 'a'), 'a')
+  assert.equal(resolveSeatPath('D:/work', ''), '')
+})
+
+test('原生注入面：打开失败与服务缺席都必须显式报错，不能静默', async () => {
+  const { nativeSeatFace } = client.__internals
+  const failing = seatFaceStub({
+    remote: {
+      session: { openWorkspacePath: () => Promise.resolve({ ok: false, error: { message: 'no access' } }) },
+    },
+  })
+  await assert.rejects(() => nativeSeatFace(failing.ctx, 'session-1').openFile('a.js'), /no access/)
+
+  const bare = seatFaceStub({})
+  await assert.rejects(() => nativeSeatFace(bare.ctx, 'session-1').openFile('a.js'), /remote\.session 不可用/)
+})
+
+test('原生注入面：loadImage / fileMentions / forkAt 的可用与降级', async () => {
+  const { nativeSeatFace } = client.__internals
+  const owners = []
+  const { ctx, calls } = seatFaceStub({
+    uiConversation: {
+      imageUrl: (sessionId, attachment) => `url:${sessionId}:${attachment}`,
+      peekImageUrl: (sessionId, attachment) => `peek:${sessionId}:${attachment}`,
+    },
+    chatFileMentions: {
+      forClosing: (owner) => {
+        owners.push(owner)
+        return ['a.js']
+      },
+    },
+  })
+  const face = nativeSeatFace(ctx, 'session-1')
+  assert.equal(face.loadImage('x.png'), 'url:session-1:x.png')
+  assert.equal(face.loadImage.peek('x.png'), 'peek:session-1:x.png')
+  assert.deepEqual(face.fileMentions({ seq: 9 }), ['a.js'])
+  assert.deepEqual(owners, [{ seq: 9 }])
+
+  face.forkAt(42)
+  assert.deepEqual(calls.forked, [{ sessionId: 'session-1', atSeq: 42, increaseTitle: true }])
+  await Promise.resolve()
+  assert.deepEqual(calls.opened, ['child-1'], '分叉成功后应打开子会话')
+
+  // 服务缺席时能力降级为「没有」，而不是抛异常把视图带崩。
+  const bare = nativeSeatFace(seatFaceStub({}).ctx, 'session-1')
+  assert.equal(bare.loadImage, undefined)
+  assert.equal(bare.fileMentions({ seq: 1 }), undefined)
+  assert.doesNotThrow(() => bare.forkAt(1))
 })

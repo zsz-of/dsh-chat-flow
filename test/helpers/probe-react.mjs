@@ -28,7 +28,20 @@ export function createProbeReact() {
   /** 当前正在渲染的 mount 的槽位（同一时刻只有一个）。 */
   let active = null
 
+  /** 类组件基类：探针不实例化类组件，但 bundle 里定义错误边界时会 `extends react.Component`。 */
+  class Component {
+    constructor(props) {
+      this.props = props ?? {}
+      this.state = {}
+    }
+
+    setState(next) {
+      this.state = { ...this.state, ...(typeof next === 'function' ? next(this.state, this.props) : next) }
+    }
+  }
+
   const react = {
+    Component,
     createElement(type, props, ...children) {
       if (type === undefined || type === null) throw new Error('createElement 收到了未定义的组件')
       const merged = { ...(props ?? {}) }

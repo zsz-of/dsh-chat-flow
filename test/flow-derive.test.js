@@ -13,6 +13,7 @@ import { loadBundle } from './helpers/load-bundle.mjs'
 import {
   askNode,
   assistantNode,
+  contextNode,
   editNode,
   interruptedPwshNode,
   makeSnapshot,
@@ -21,6 +22,7 @@ import {
   subagentCallNode,
   todoNode,
   toolNode,
+  turnTailNode,
   userNode,
   writeNode,
 } from './helpers/flow-fixtures.mjs'
@@ -37,6 +39,9 @@ const {
   toolCardOf,
   diffCountsOf,
   processEntries,
+  nodeRowOf,
+  groupProcessNodes,
+  seatNodesOf,
   deriveFlow,
   todosOfToolCall,
   diffTodos,
@@ -334,4 +339,99 @@ test('未知/损坏的节点不抛异常', () => {
   })
   assert.equal(flow.turns.length, 1)
   assert.equal(flow.turns[0].planned, false)
+})
+
+/* ──────────────────────────── 原生座位的派生契约 ──────────────────────────── */
+
+test('单节点回退模型：一个节点一条，且不做跨节点合并', () => {
+  const tool = pwshNode('t1', 1, 3, 'echo a', 'a')
+  const text = assistantNode('a1', 1, 4, [{ kind: 'text', text: '说完了' }])
+  const reasoning = assistantNode('a2', 1, 5, [{ kind: 'reasoning', text: '先想一下' }])
+
+  assert.equal(nodeRowOf(contextNode('c1', 1, 1, '规则')).kind, 'context')
+  assert.equal(nodeRowOf(contextNode('c1', 1, 1, '规则')).text, '规则')
+  assert.equal(nodeRowOf(userNode('u1', 1, '问题')).kind, 'message')
+  assert.equal(nodeRowOf(tool).kind, 'tool')
+  assert.equal(nodeRowOf(tool).card.kind, 'command')
+  assert.equal(nodeRowOf(text).kind, 'assistant')
+  assert.equal(nodeRowOf(text).text, '说完了')
+  // 只有推理的助手步 → 「思考」行；没有任何可渲染内容 → null。
+  assert.equal(nodeRowOf(reasoning).kind, 'thinking')
+  assert.equal(nodeRowOf(reasoning).text, '先想一下')
+  assert.equal(nodeRowOf({ key: 'x', kind: 'turn-process', data: {} }), null)
+  assert.equal(nodeRowOf(null), null)
+})
+
+test('上下文注入合并成一行，位置取第一次注入出现的地方', () => {
+  const rows = groupProcessNodes([
+    pwshNode('t1', 1, 1, 'echo a', 'a'),
+    contextNode('c1', 1, 2, '规则'),
+    contextNode('c2', 1, 3, '记忆'),
+    pwshNode('t2', 1, 4, 'echo b', 'b'),
+    contextNode('c3', 1, 5, '时间'),
+  ])
+  assert.deepEqual(rows.map((row) => row.kind), ['node', 'contexts', 'node'], '这一段只出一个上下文折叠点')
+  assert.deepEqual(rows[1].nodes.map((node) => node.key), ['c1', 'c2', 'c3'], '全部注入合进同一个折叠点')
+  assert.equal(rows[0].node.key, 't1')
+  assert.equal(rows[2].node.key, 't2', '折叠点落在第一次注入的位置，后面的动作仍按原顺序跟在它后面')
+  assert.deepEqual(groupProcessNodes([]), [])
+})
+
+test('「此刻正在做的那一项」：被后续列表更新完成或删除后不再默认展开', () => {
+  const plan = [
+    { content: '任务A', status: 'in_progress' },
+    { content: '任务B', status: 'pending' },
+  ]
+  const live = deriveFlow(
+    makeSnapshot([userNode('u1', 1, '干活'), todoNode('p1', 1, 1, plan), pwshNode('t1', 1, 2, 'echo a', 'a')]),
+  ).turns[0]
+  assert.deepEqual(live.segments.map((segment) => segment.isCurrentTask), [true], '只有一次更新 → 它就是在做的那一项')
+
+  const advanced = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, plan),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      todoNode('p2', 1, 3, [
+        { content: '任务A', status: 'completed' },
+        { content: '任务B', status: 'in_progress' },
+      ]),
+    ]),
+  ).turns[0]
+  assert.deepEqual(
+    advanced.segments.map((segment) => segment.isCurrentTask),
+    [false, true],
+    'A 已被后续更新标成完成 → 历史分段收起；B 才是当前的',
+  )
+
+  const allDone = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, plan),
+      todoNode('p2', 1, 2, [
+        { content: '任务A', status: 'completed' },
+        { content: '任务B', status: 'completed' },
+      ]),
+    ]),
+  ).turns[0]
+  assert.equal(
+    allDone.segments.some((segment) => segment.isCurrentTask),
+    false,
+    '全部完成 → 没有任何一项是「正在做」',
+  )
+})
+
+test('回合已结束时，未完成的任务仍被标记为 unfinished', () => {
+  const group = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      turnTailNode('tt1', 1, 3),
+    ]),
+  ).turns[0]
+  assert.equal(group.closed, true)
+  assert.equal(group.unfinished, true)
+  // turn-tail 是核心的收尾控制器，本插件用阶段折叠替代它，节点本身不进渲染序列。
+  assert.deepEqual(seatNodesOf([...group.segments[0].nodes, ...group.closing]).map((node) => node.kind), ['tool-call'])
 })

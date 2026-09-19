@@ -135,3 +135,36 @@ export function writeNode(key, turn, step, path) {
 export function todoNode(key, turn, step, todos) {
   return toolNode(key, turn, step, 'todo_write', { todos }, { content: 'updated' })
 }
+
+/**
+ * 上下文注入节点（规则 / 记忆 / 时间 / 环境…）。
+ *
+ * 形状来自核心 `input-message` 定义：`source.kind !== 'user'` 的 `user/message` 事件被渲染成
+ * `kind: 'context'`，状态里带 `content` / `source` / `provenance` / `form`
+ * （`dsh-client-ui-chat/lib/client.js:5752-5760`）。
+ */
+export function contextNode(key, turn, step, text, source = { kind: 'plugin', plugin: 'chat-flow', form: 'snapshot' }) {
+  return envelope(key, turn, step, 'context', {
+    kind: 'context',
+    seq: 2,
+    time: 0,
+    content: [{ type: 'text', text }],
+    source,
+    provenance: { kind: 'system' },
+    form: 'snapshot',
+  })
+}
+
+/**
+ * 回合尾部节点（`turn/end` 之后的收尾控制器）。
+ *
+ * 本插件**自己**接管这个 kind（阶段折叠就是它的替代品），所以它的 data 只参与「回合是否已结束」
+ * 的判定；形状按核心 `tailData` 的公开字段给出（`dsh-client-ui-chat/lib/client.js:6905-6907`）。
+ */
+export function turnTailNode(key, turn, step, text = '做完了') {
+  return envelope(key, turn, step, 'turn-tail', {
+    turn,
+    closing: { finalNode: { seq: 9 }, blocks: [{ kind: 'text', text }], time: 0 },
+    branchUnavailable: false,
+  })
+}

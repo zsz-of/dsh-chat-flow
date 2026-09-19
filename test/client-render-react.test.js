@@ -61,6 +61,7 @@ function profileNodeModules() {
 }
 
 let renderToString
+let ReactRef
 let internals
 let ready = false
 /** 真实 primitives 的装载结果：只有它能验证「展开态真的能渲染」。 */
@@ -75,6 +76,7 @@ before(async () => {
   try {
     const require = createRequire(`${base.replace(/[\\/]+$/, '')}/`)
     const React = require('react')
+    ReactRef = React
     renderToString = require('react-dom/server').renderToString
     /** primitives 替身用真实 React 元素：既保留 children 语义，又不依赖主题与 CSS 模块。 */
     const primitives = new Proxy(
@@ -124,8 +126,11 @@ before(async () => {
 /**
  * 渲染主视图并拿到 HTML。
  *
+ * `options.renderSlot` 传进来就模拟「核心装配齐全」：节点会走原生座位；
+ * 不传（默认）就是本插件的**回退路径**——这也是插件在没有 ui-chat 的装配里的真实形态。
+ *
  * @param snapshot - `useChat` 快照。
- * @param options - `sessionId`、`session`（`useSession` 的返回值，决定 running/hasMore）。
+ * @param options - `sessionId`、`session`（`useSession` 的返回值）、`outline`、`renderSlot`、`useSessions`。
  */
 function render(snapshot, options = {}) {
   const t = (key, params) => {
@@ -141,6 +146,10 @@ function render(snapshot, options = {}) {
       useSession: () => ({ hasMore: false, loadingOlder: false, running: false, ...(options.session ?? {}) }),
       useProjection: () => options.outline,
       loadOlder: () => {},
+      renderSlot: options.renderSlot,
+      useSessions: options.useSessions,
+      openFile: options.openFile,
+      openView: options.openView,
     }),
   )
 }
@@ -334,4 +343,41 @@ test('SSR：turnOutline 里的未加载回合也画刻度，并标出「加载�
   assert.equal((html.match(/data-loaded="true"/g) ?? []).length, 1, '一个已加载刻度')
   assert.match(html, /aria-label="加载并跳到第 1 轮"/)
   assert.match(html, /aria-label="跳到第 3 轮"/)
+})
+
+/* ──────────────────────────── 原生座位（真实 React） ──────────────────────────── */
+
+test('SSR：原生座位在真实 React 下渲染，展开态与锚点属性都在', (t) => {
+  if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
+  const seen = []
+  const html = render(
+    makeSnapshot([
+      userNode('u1', 1, '跑测试'),
+      todoNode('p1', 1, 1, [{ content: '跑测试', status: 'in_progress' }]),
+      pwshNode('t1', 1, 2, 'node --test', 'ok'),
+    ]),
+    {
+      session: { running: true },
+      renderSlot: (slot, owner, options) => {
+        seen.push({ slot, kind: owner.node.kind, entryKey: options.entryKey })
+        // 替身座位：只证明「这一行交给了插槽」，并渲染出可断言的内容。
+        return ReactRef.createElement(
+          'div',
+          { 'data-native-seat': options.entryKey },
+          ReactRef.createElement('span', null, `native:${owner.node.kind}`),
+        )
+      },
+    },
+  )
+
+  assert.equal(seen.length > 0, true, '至少有一次座位调用')
+  assert.equal(seen.every((call) => call.entryKey === call.kind), true, 'entryKey 必须等于节点 kind')
+  assert.match(html, /data-native-seat="user"/)
+  assert.match(html, /native:tool-call/)
+  // 座位接手的行不再画本插件的卡片。
+  assert.equal(html.includes('dcf-card'), false)
+  // 核心同款的锚点属性仍在（别人的插件靠它们挂载，例如回退按钮）。
+  assert.match(html, /data-chat-flow-kind="user"[^>]*data-chat-anchor-key="u1"/)
+  assert.match(html, /data-chat-flow-kind="tool-call"[^>]*data-chat-anchor-key="t1"/)
+  assert.match(html, /data-chat-turn="1"/)
 })

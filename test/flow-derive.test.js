@@ -19,6 +19,7 @@ import {
   makeSnapshot,
   mcpNode,
   pwshNode,
+  steeringNode,
   subagentCallNode,
   todoNode,
   toolNode,
@@ -41,6 +42,7 @@ const {
   processEntries,
   nodeRowOf,
   groupProcessNodes,
+  nodeRunsOf,
   seatNodesOf,
   cutOffOf,
   observedRpcIdsOf,
@@ -559,5 +561,52 @@ test('渲染序只认 order：回滚后已移出呈现序的节点不再被画�
     orderedNodes(snapshot).map((node) => node.key).join(','),
     'u1,t1',
     '派生序与核心的 order 一致（不再补渲染 Map 里的残留节点）',
+  )
+})
+
+/* ──────────────────────────── 插队消息 = 分组边界 ──────────────────────────── */
+
+test('插队消息开一个新分组：用户内容永远在最外层，上一个节点就此结束', () => {
+  const flow = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '第一件事'),
+      todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      steeringNode('s1', 1, 3, '顺便把这个也做了'),
+      pwshNode('t2', 1, 4, 'echo b', 'b'),
+    ]),
+  )
+
+  assert.equal(flow.turns.length, 2, '插队消息把同一个回合切成两组')
+  assert.deepEqual(flow.turns.map((group) => group.turn), [1, 1], '两组的回合号相同')
+  assert.notEqual(flow.turns[0].key, flow.turns[1].key, '分组 key 必须唯一（折叠状态按它记忆）')
+  assert.equal(flow.turns[0].inputKind, 'user')
+  assert.equal(flow.turns[1].inputKind, 'steering', '第二组以插队消息开头')
+  assert.equal(flow.turns[1].input.key, 's1')
+  assert.deepEqual(
+    flow.turns[0].segments[0].nodes.map((node) => node.key),
+    ['t1'],
+    '插队之前的动作留在第一组的分段里',
+  )
+  assert.deepEqual(flow.turns[1].looseNodes.map((node) => node.key), ['t2'], '插队之后的动作属于新一组')
+})
+
+test('nodeRunsOf：最外层节点被剔除，并且切断相邻的过程块', () => {
+  const runs = nodeRunsOf([
+    pwshNode('t1', 1, 1, 'echo a', 'a'),
+    steeringNode('s1', 1, 2, '插一句'),
+    pwshNode('t2', 1, 3, 'echo b', 'b'),
+    assistantNode('a1', 1, 4, [{ kind: 'text', text: '说点什么' }]),
+    pwshNode('t3', 1, 5, 'echo c', 'c'),
+  ])
+  assert.deepEqual(
+    runs.map((run) => [run.kind, run.nodes.map((node) => node.key)]),
+    [
+      ['process', ['t1']],
+      ['process', ['t2']],
+      ['inline', ['a1']],
+      ['process', ['t3']],
+    ],
+    '插队消息本身不渲染在块里，但它让前后两块断开（用户发了消息 → 上一块结束）',
   )
 })

@@ -17,6 +17,41 @@ const { exports } = await loadBundle({ react })
 const { useScroller, TOP_LOAD_THRESHOLD_PX } = exports.__internals
 
 /**
+ * 手动驱动的 `requestAnimationFrame`：把回调排队，由测试决定什么时候走一帧。
+ *
+ * 加载期间的「钉住」是一个逐帧循环，node 环境本来没有 rAF，所以要用它把帧拉进单测。
+ *
+ * @returns `{step, restore}`。
+ */
+function installFrames() {
+  const queue = new Map()
+  let nextId = 1
+  const previousFrame = globalThis.requestAnimationFrame
+  const previousCancel = globalThis.cancelAnimationFrame
+  globalThis.requestAnimationFrame = (callback) => {
+    const id = nextId
+    nextId += 1
+    queue.set(id, callback)
+    return id
+  }
+  globalThis.cancelAnimationFrame = (id) => {
+    queue.delete(id)
+  }
+  return {
+    /** 走一帧：只跑这一帧之前排进来的回调（回调自己会再排下一帧）。 */
+    step() {
+      const pending = [...queue.values()]
+      queue.clear()
+      for (const callback of pending) callback()
+    },
+    restore() {
+      globalThis.requestAnimationFrame = previousFrame
+      globalThis.cancelAnimationFrame = previousCancel
+    },
+  }
+}
+
+/**
  * 挂载探针：跑一次 `useScroller` 并把调用记录收下来。
  *
  * @param options - `turns`、`hasMore`、`loadingOlder`、`loadOlder`。
@@ -156,6 +191,49 @@ test('锚定：一次加载里的多批前插都持续钉住同一个节点', ()
   const settled = fake.scroller.scrollTop
   harness.render()
   assert.equal(fake.scroller.scrollTop, settled)
+})
+
+test('加载期间把页面钉住：前插与用户滚动都会被纠回原位置', () => {
+  const frames = installFrames()
+  try {
+    const { harness, fake, state } = probeScroller(
+      { firstSeq: 100 },
+      { scrollTop: 20, nodeRows: [{ key: 'n1', top: 40 }, { key: 'n2', top: 300 }] },
+    )
+    fake.fire()
+    state.loadingOlder = true
+    harness.render()
+    // 用户在加载期间滚了一下：下一帧就被纠回原位（这就是「不允许滚动、固定页面」）。
+    fake.setTop(120)
+    frames.step()
+    assert.equal(fake.scroller.scrollTop, 20, '加载中用户滚动会被立刻纠回')
+    // 更早的内容前插进来（内容下移 200）：锚点行位置保持不动。
+    fake.setNodeRowTop('n1', 240)
+    fake.setNodeRowTop('n2', 500)
+    frames.step()
+    assert.equal(fake.scroller.scrollTop, 220, '前插的内容被补偿，阅读位置不动')
+    // 加载结束 → 解除钉住，滚动权利交还用户。
+    state.loadingOlder = false
+    harness.render()
+    fake.setTop(999)
+    frames.step()
+    assert.equal(fake.scroller.scrollTop, 999, '加载结束后不再钉住')
+  } finally {
+    frames.restore()
+  }
+})
+
+test('没有在加载时不装钉住循环（不能干扰用户滚动）', () => {
+  const frames = installFrames()
+  try {
+    const { fake } = probeScroller({ firstSeq: 100 }, { scrollTop: 20, nodeRows: [{ key: 'n1', top: 40 }] })
+    frames.step()
+    fake.setTop(400)
+    frames.step()
+    assert.equal(fake.scroller.scrollTop, 400, '不在加载中 → 一帧都不该改滚动位置')
+  } finally {
+    frames.restore()
+  }
 })
 
 test('滚动时跟踪视口顶部所在的回合', () => {

@@ -91,12 +91,19 @@ export function createProbeReact() {
     const slots = { states: [], refs: [], stateCursor: 0, refCursor: 0, effects: [], cleanups: [] }
     const harness = {
       value: undefined,
-      /** 重跑组件与全部 effect（模拟依赖变化 / 重渲染）。 */
+      /**
+       * 重跑组件与全部 effect（模拟重渲染）。
+       *
+       * **先跑上一轮的清理函数再跑这一轮的 effect**——真实 React 在依赖变化时就是这个顺序，
+       * 少了这一步，「依赖变化时应该停掉的循环」（例如加载期间的逐帧钉住）会一直跑下去，
+       * 测试就会看到一个早该被取消的帧还在改滚动位置。
+       */
       render() {
         active = slots
         slots.stateCursor = 0
         slots.refCursor = 0
         slots.effects = []
+        while (slots.cleanups.length > 0) slots.cleanups.pop()()
         harness.value = Component(props)
         const queued = slots.effects
         slots.effects = []
@@ -155,6 +162,10 @@ export function createFakeScroller(options = {}) {
   /**
    * 节点行：本视图的每一行（`.dcf-leaf`）都带 `data-chat-anchor-key`，加载历史时的**阅读锚点**
    * 就是按它记录的（核心同款属性）。位置可被 `setNodeRowTop` 改动，用来模拟「前插把内容推下去」。
+   *
+   * ⚠️ 这些行的视口位置**随滚动变化**（`top - scrollTop`）——真实 DOM 就是这样；
+   * 少了这一条，「加载期间把页面钉住」的逻辑在测试里永远算出 0 位移，等于没测。
+   * 回合锚点（`[data-turn-anchor]`）刻意保持与滚动无关：`activeTurn` 的用例是按固定坐标写的。
    */
   const nodeTops = new Map()
   for (const row of options.nodeRows ?? [{ key: 'n1', top: -40 }, { key: 'n2', top: 300 }]) {
@@ -162,7 +173,7 @@ export function createFakeScroller(options = {}) {
   }
   const nodeRows = [...nodeTops.keys()].map((key) => ({
     getAttribute: (name) => (name === 'data-chat-anchor-key' ? key : null),
-    getBoundingClientRect: () => ({ top: nodeTops.get(key) ?? 0 }),
+    getBoundingClientRect: () => ({ top: (nodeTops.get(key) ?? 0) - scroller.scrollTop }),
   }))
 
   const root = {

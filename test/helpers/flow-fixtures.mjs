@@ -45,6 +45,23 @@ export function userNode(key, turn, text) {
   })
 }
 
+/**
+ * 插队消息节点（用户在助手干活期间发进来的那条）。
+ *
+ * 形状来自核心 `input-message` 定义：`source.kind === 'user'` 且已被本轮认领的 `user/message`
+ * 被渲染成 `kind: 'steering'`，状态里多一个 `messageId`（`dsh-client-ui-chat/lib/client.js:5761-5768`）。
+ */
+export function steeringNode(key, turn, step, text) {
+  return envelope(key, turn, step, 'steering', {
+    kind: 'steering',
+    messageId: key,
+    seq: 3,
+    time: 0,
+    content: [{ type: 'text', text }],
+    source: { kind: 'user', rpcId: key },
+  })
+}
+
 /** 助手节点。`blocks` 传 `{kind:'text'|'reasoning', text}`。 */
 export function assistantNode(key, turn, step, blocks) {
   return envelope(key, turn, step, 'assistant-step', {

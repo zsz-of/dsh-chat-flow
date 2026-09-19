@@ -242,7 +242,7 @@ test('SSR：任务列表默认展开；任务过程与思考块默认收起', (t
   )
   assert.match(settledButUnfinished, /data-status="in_progress"/)
   assert.match(settledButUnfinished, /aria-expanded="true"/)
-  assert.match(settledButUnfinished, /未完成/)
+  assert.match(settledButUnfinished, /被打断/, '半途停下的回合标「被打断」，不再写「未完成」')
 
   // 全部完成后：任务行与「正在处理」都自动收起。
   const done = render(

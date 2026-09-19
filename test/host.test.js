@@ -11,6 +11,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { before, test } from 'node:test'
 
+import { PROTOCOL_BUDGET } from '../lib/protocol.js'
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PEER_LINK = join(HERE, '..', 'node_modules', '@deepseek-ai', 'dsh-llm')
 
@@ -94,6 +96,12 @@ test('host 接线：注册一段命名唯一、顺序固定的系统提示分区
   for (const phrase of ['任务开始时', '输出任务计划时', '需要用户审批或决定时', '任务结束时', 'todo_write', '禁止批量补记']) {
     assert.ok(section.text.includes(phrase), `协议正文缺少「${phrase}」`)
   }
+  // ⚠️ 这段文字**每个模型请求都会进系统提示**（一个回合几十步就是几十次），所以长度要锁住：
+  // 想加内容就得先删掉同量的内容，否则每次请求都在为它多付钱。
+  assert.ok(
+    section.text.length <= PROTOCOL_BUDGET,
+    `协议正文 ${section.text.length} 字符，超出预算 ${PROTOCOL_BUDGET}——它每个请求都要付一次`,
+  )
 })
 
 test('回合第一步注入规划提醒，且同一回合只注入一次', async (t) => {

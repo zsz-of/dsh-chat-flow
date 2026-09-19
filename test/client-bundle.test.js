@@ -15,6 +15,7 @@ import {
   contextNode,
   makeSnapshot,
   pwshNode,
+  steeringNode,
   systemPromptNode,
   todoNode,
   turnTailNode,
@@ -730,7 +731,7 @@ test('插队 / 排队的消息在列表末尾有座位，并标出各自状态',
   assert.match(collectText(deduped), /插一句话/, '插队项仍在队列里，照常显示')
 })
 
-test('取消键留下的半截过程：标成「思考未完成」，内容仍在（挂载不卸载）', () => {
+test('取消键留下的半截过程：标成「被打断」，内容仍在（挂载不卸载）', () => {
   const { view, t } = bootView()
   const half = assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '写到一半就停了' }])
   half.data.status = 'interrupted'
@@ -749,12 +750,13 @@ test('取消键留下的半截过程：标成「思考未完成」，内容仍�
     useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
   })
   const text = collectText(tree)
-  assert.match(text, /思考未完成/, '被打断的块要明确说是未完成，不能装作「已完成」')
+  assert.match(text, /被打断/, '半截的过程要写「被打断」（用户要求用这个词，不要「未完成」）')
+  assert.equal(text.includes('未完成'), false, '不再出现「未完成」字样')
   assert.match(text, /写到一半就停了/, '内容必须还在（折叠体保持挂载，只是收起）')
   const head = findElement(
     tree,
     (element) =>
-      String(element.props?.className ?? '').includes('dcf-thinkinghead') && collectText(element).includes('思考未完成'),
+      String(element.props?.className ?? '').includes('dcf-thinkinghead') && collectText(element).includes('被打断'),
   )
   assert.equal(head.props['aria-expanded'], false, '思考块一律默认收起（用户要求），点开即可看到半截内容')
 })
@@ -937,18 +939,22 @@ test('规划过程：不重复显示任务列表，也不写「N 项 · M 已完
     1,
     '任务列表快照面板只应有一块',
   )
-  // 「任务过程」那一层也含「规划过程」三个字，所以取**最内层**的那个块（就是规划分组自己）。
-  const planBlock = preorderOf(tree)
-    .filter(
-      (element) =>
-        String(element.props?.className ?? '') === 'dcf-block' && collectText(element).includes('规划过程'),
-    )
-    .at(-1)
+  // 规划分组带专属类名 `dcf-planfold`，而且**与「任务过程」同级**（都在回合块下，不是嵌套在里面）。
+  const planBlock = preorderOf(tree).find((element) =>
+    String(element.props?.className ?? '').includes('dcf-planfold'),
+  )
   assert.ok(planBlock !== undefined, '应有「规划过程」折叠分组')
   assert.equal(
     countIn(planBlock, (element) => String(element.props?.className ?? '').includes('dcf-taskrow')),
     0,
     '规划过程里不该再画一份任务清单（那一份就是下面的快照面板）',
+  )
+  const turn = findElement(tree, (element) => element.props?.className === 'dcf-turn')
+  const children = (Array.isArray(turn.props.children) ? turn.props.children : [turn.props.children]).filter(Boolean)
+  assert.equal(
+    children.some((child) => String(child.props?.className ?? '').includes('dcf-planfold')),
+    true,
+    '规划过程是回合块的直接子节点（与任务过程同级，不再被折进任务过程）',
   )
   const planHead = findElement(planBlock, (element) => String(element.props?.className ?? '').includes('dcf-row'))
   assert.equal(planHead.props['aria-expanded'], false, '规划过程默认收起（规划完成后自动折叠）')
@@ -1020,3 +1026,75 @@ test('系统提示词并入「上下文准备」，只成一个折叠点', () =>
     '不再有单独的「系统提示词」行',
   )
 })
+
+test('任务列表只写「已完成：…」，不写「本次变化」', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-plate-done',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [
+            { content: '任务A', status: 'in_progress' },
+            { content: '任务B', status: 'pending' },
+          ]),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+          todoNode('p2', 1, 3, [
+            { content: '任务A', status: 'completed' },
+            { content: '任务B', status: 'in_progress' },
+          ]),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+
+  const text = collectText(tree)
+  assert.match(text, /已完成：任务A/, '第二块快照点出这一版里已完成的那一项')
+  assert.equal(text.includes('本次变化'), false, '不再写「本次变化」那种对比说明')
+  assert.equal(text.includes('✓'), false, '也不再出现变化符号')
+})
+
+test('插队消息留在最外层：它自己的行不被任何折叠体吞掉，且后面另起一块', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-steering-top',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '第一件事'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+          assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '先想一下' }]),
+          steeringNode('s1', 1, 3, '顺便把这个也做了'),
+          pwshNode('t1', 1, 4, 'echo b', 'b'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+
+  const nodes = preorderOf(tree)
+  const steeringRow = nodes.find((element) => element.props?.['data-chat-flow-kind'] === 'steering')
+  assert.ok(steeringRow !== undefined, '插队消息应当有一条自己的行')
+  assert.equal(
+    foldDepthOf(tree, (element) => element.props?.['data-chat-flow-kind'] === 'steering'),
+    0,
+    '插队消息必须在所有折叠体之外（用户要求用户内容永远留在最外层）',
+  )
+  assert.match(collectText(steeringRow), /插队/, '行首标记写明它是插队消息')
+  // 插队之前的思考块必须在它上面，插队之后的动作在它下面。
+  const heads = nodes.filter((element) => String(element.props?.className ?? '').includes('dcf-thinkinghead'))
+  assert.equal(heads.length, 2, '插队把过程切成两块：插队前一块、插队后一块')
+  assert.ok(nodes.indexOf(heads[0]) < nodes.indexOf(steeringRow), '第一块在插队消息之前')
+  assert.ok(nodes.indexOf(steeringRow) < nodes.indexOf(heads[1]), '第二块在插队消息之后（新节点从这里开始）')
+  assert.equal(text2Blocks(tree), true, '第一块被插队消息封口（思考已完成），第二块还在写（思考中）')
+})
+
+/** 断言两块的标题一个「思考已完成」、一个「思考中」（第一块被插队消息封口）。 */
+function text2Blocks(tree) {
+  const heads = preorderOf(tree).filter((element) =>
+    String(element.props?.className ?? '').includes('dcf-thinkinghead'),
+  )
+  return /思考已完成/.test(collectText(heads[0])) && /思考中/.test(collectText(heads[heads.length - 1]))
+}

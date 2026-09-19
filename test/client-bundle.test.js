@@ -12,8 +12,10 @@ import { collectText, createStorage, loadBundle } from './helpers/load-bundle.mj
 import { createProbeReact } from './helpers/probe-react.mjs'
 import {
   assistantNode,
+  contextNode,
   makeSnapshot,
   pwshNode,
+  systemPromptNode,
   todoNode,
   turnTailNode,
   userNode,
@@ -196,12 +198,12 @@ test('默认展开策略：正在写的块展开、任务列表与明细收起',
   })
   assert.match(collectText(tree), /任务A/)
   assert.match(collectText(tree), /进行中/)
-  // 用户本轮定下的默认策略：**任务过程始终折叠**（即使在跑）；任务行展开（就是当前那一项）；
-  // 思考块展开（这一块里还包含着正在写的最后一个节点）；任务列表快照面板收起；卡片明细也收起。
+  // 用户当轮的默认策略：**任务过程始终折叠**；**带背景板的任务列表默认展开**；
+  // 任务行展开（就是当前那一项）；**思考块默认折叠**（哪怕它还在写）；卡片明细收起。
   assert.deepEqual(
     foldStates(tree),
-    ['false', 'false', 'true', 'true', 'false'],
-    '任务过程与快照面板收起；任务行 / 思考块展开；卡片明细收起',
+    ['false', 'true', 'true', 'false', 'false'],
+    '任务过程收起、任务列表展开、任务行展开、思考块收起、卡片明细收起',
   )
   assert.match(collectText(tree), /live-command/)
 })
@@ -221,9 +223,9 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
     useSession: () => ({ hasMore: false, running: true }),
   }
   const before = view.component(props)
-  assert.deepEqual(foldStates(before), ['false', 'false', 'true', 'true', 'false'], '任务过程与快照面板收起；任务行 / 思考块展开')
+  assert.deepEqual(foldStates(before), ['false', 'true', 'true', 'false', 'false'], '任务过程收起、任务列表展开、任务行展开、思考块收起')
 
-  // 点「思考中」那一行 → 收起它。
+  // 点「思考中」那一行 → 展开它（默认是收起的）。
   const procRow = findElement(
     before,
     (element) => String(element.props?.className ?? '').includes('dcf-row') && collectText(element).includes('思考'),
@@ -232,7 +234,7 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
   procRow.props.onClick()
 
   const after = view.component({ ...props, t })
-  assert.deepEqual(foldStates(after), ['false', 'false', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
+  assert.deepEqual(foldStates(after), ['false', 'true', 'true', 'true', 'false'], '手动展开「思考」块后应保持展开')
 })
 
 test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {
@@ -728,7 +730,7 @@ test('插队 / 排队的消息在列表末尾有座位，并标出各自状态',
   assert.match(collectText(deduped), /插一句话/, '插队项仍在队列里，照常显示')
 })
 
-test('取消键留下的半截过程：折叠体保持展开并标成「思考未完成」', () => {
+test('取消键留下的半截过程：标成「思考未完成」，内容仍在（挂载不卸载）', () => {
   const { view, t } = bootView()
   const half = assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '写到一半就停了' }])
   half.data.status = 'interrupted'
@@ -748,13 +750,13 @@ test('取消键留下的半截过程：折叠体保持展开并标成「思考�
   })
   const text = collectText(tree)
   assert.match(text, /思考未完成/, '被打断的块要明确说是未完成，不能装作「已完成」')
-  assert.match(text, /写到一半就停了/, '内容必须还在（折叠体保持挂载且默认展开）')
+  assert.match(text, /写到一半就停了/, '内容必须还在（折叠体保持挂载，只是收起）')
   const head = findElement(
     tree,
     (element) =>
       String(element.props?.className ?? '').includes('dcf-thinkinghead') && collectText(element).includes('思考未完成'),
   )
-  assert.equal(head.props['aria-expanded'], true, '被打断的块默认展开')
+  assert.equal(head.props['aria-expanded'], false, '思考块一律默认收起（用户要求），点开即可看到半截内容')
 })
 
 test('视图层错误边界：本插件自己的渲染错误降级成错误摘要，而非让整块视图让位', async () => {
@@ -879,4 +881,142 @@ test('「任务过程」始终默认折叠（即使在跑）', () => {
   assert.ok(stageRow !== undefined, '应有「任务过程」折叠头')
   assert.equal(stageRow.props['aria-expanded'], false, '「任务过程」默认必须收起')
   assert.match(collectText(stageRow), /任务耗时/, '收起时也要能看到耗时（实时计时仍写在折叠头上）')
+})
+
+/* ──────────────────────────── 本轮（第七轮）的行为 ──────────────────────────── */
+
+/**
+ * 前序遍历元素树，返回所有元素（按出现顺序）。
+ *
+ * @param element - 根元素。
+ * @returns 元素数组。
+ */
+function preorderOf(element) {
+  const seen = []
+  const walk = (value) => {
+    if (value === null || value === undefined || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    seen.push(value)
+    walk(value.props?.children)
+  }
+  walk(element)
+  return seen
+}
+
+/** 子树里满足条件的元素个数。 */
+function countIn(element, predicate) {
+  return preorderOf(element).filter(predicate).length
+}
+
+test('规划过程：不重复显示任务列表，也不写「N 项 · M 已完成」', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-plan-once',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          assistantNode('a1', 1, 1, [{ kind: 'text', text: '先规划一下。' }]),
+          todoNode('p1', 1, 2, [
+            { content: '任务A', status: 'in_progress' },
+            { content: '任务B', status: 'pending' },
+          ]),
+          pwshNode('t1', 1, 3, 'echo a', 'a'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+
+  // 任务列表只出现一次（就是那一块快照面板）——以前规划过程里还会再画一份初稿清单。
+  assert.equal(
+    countIn(tree, (element) => String(element.props?.className ?? '').includes('dcf-platehead')),
+    1,
+    '任务列表快照面板只应有一块',
+  )
+  // 「任务过程」那一层也含「规划过程」三个字，所以取**最内层**的那个块（就是规划分组自己）。
+  const planBlock = preorderOf(tree)
+    .filter(
+      (element) =>
+        String(element.props?.className ?? '') === 'dcf-block' && collectText(element).includes('规划过程'),
+    )
+    .at(-1)
+  assert.ok(planBlock !== undefined, '应有「规划过程」折叠分组')
+  assert.equal(
+    countIn(planBlock, (element) => String(element.props?.className ?? '').includes('dcf-taskrow')),
+    0,
+    '规划过程里不该再画一份任务清单（那一份就是下面的快照面板）',
+  )
+  const planHead = findElement(planBlock, (element) => String(element.props?.className ?? '').includes('dcf-row'))
+  assert.equal(planHead.props['aria-expanded'], false, '规划过程默认收起（规划完成后自动折叠）')
+  assert.equal(/项 ·/.test(collectText(planHead)), false, '折叠头不再显示「N 项 · M 已完成」')
+})
+
+test('思考块被正文切成多块：正文一出现，上一块封口，下一块重新开始', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-runs',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+          assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '第一段思考' }]),
+          assistantNode('a2', 1, 3, [{ kind: 'text', text: '第一段结论' }]),
+          pwshNode('t1', 1, 4, 'echo a', 'a'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+
+  const nodes = preorderOf(tree)
+  const heads = nodes.filter((element) => String(element.props?.className ?? '').includes('dcf-thinkinghead'))
+  const textRows = nodes.filter(
+    (element) =>
+      String(element.props?.className ?? '').includes('dcf-leaf') && collectText(element).includes('第一段结论'),
+  )
+  assert.equal(heads.length, 2, '正文把过程切成两块：动作 → 正文 → 动作')
+  assert.ok(nodes.indexOf(heads[0]) < nodes.indexOf(textRows[0]), '第一块在正文之前')
+  assert.ok(nodes.indexOf(textRows[0]) < nodes.indexOf(heads[1]), '第二块在正文之后（新节点从这里开始）')
+  assert.match(collectText(heads[0]), /思考已完成/, '被正文封口的那一块是「已完成」')
+  assert.match(collectText(heads[1]), /思考中/, '还包含最后一个节点的那一块是「思考中」')
+  for (const head of heads) {
+    assert.equal(head.props['aria-expanded'], false, '思考块一律默认收起（用户要求）')
+  }
+})
+
+test('系统提示词并入「上下文准备」，只成一个折叠点', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-context-merge',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          contextNode('c1', 1, 1, '记忆：项目在 D 盘'),
+          systemPromptNode('sp1', 1, 2, '你是 DSH 的编码代理'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+
+  const contextFolds = preorderOf(tree).filter((element) =>
+    String(element.props?.className ?? '').includes('dcf-row'),
+  )
+  const titled = contextFolds.filter((element) => collectText(element).includes('上下文准备'))
+  assert.equal(titled.length, 1, '系统提示词与上下文注入合并成同一个折叠点')
+  assert.match(collectText(titled[0]), /2 段注入/, '折叠头写段数（两种来源都算）')
+  assert.equal(titled[0].props['aria-expanded'], false, '默认收起')
+  const text = collectText(titled[0])
+  assert.match(text, /上下文准备/)
+  assert.equal(
+    preorderOf(tree).some((element) => collectText(element).includes('系统提示词')),
+    false,
+    '不再有单独的「系统提示词」行',
+  )
 })

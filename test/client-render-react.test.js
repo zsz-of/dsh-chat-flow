@@ -208,7 +208,7 @@ test('SSR：任务状态与「正在处理」统计随节点数据变化', (t) =
   assert.match(html, /echo a/)
 })
 
-test('SSR：正在写的块展开；任务过程与任务列表始终收起', (t) => {
+test('SSR：任务列表默认展开；任务过程与思考块默认收起', (t) => {
   if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
   const running = makeSnapshot([
     userNode('u1', 1, '干活'),
@@ -218,12 +218,13 @@ test('SSR：正在写的块展开；任务过程与任务列表始终收起', (t
     ]),
     pwshNode('t1', 1, 2, 'echo a', 'a'),
   ])
-  // 会话正在跑：进行中的任务行与正在写的那一块展开；「任务过程」始终收起（用户要求）。
+  // 会话正在跑：任务行与任务列表展开；「任务过程」与思考块收起（用户要求）。
   const live = render(running, { sessionId: 'ssr-live-open', session: { running: true } })
   assert.match(live, /data-status="in_progress"/)
   assert.match(live, /aria-expanded="true"/, '进行中的任务行应展开')
-  assert.match(live, /<div class="dcf-fold" data-open="true">/)
+  assert.match(live, /<div class="dcf-fold" data-open="true">/, '任务列表应默认展开')
   assert.match(live, /思考中/, '还在写的那一块显示「思考中」')
+  assert.match(live, /dcf-thinking"[^>]*>[\s\S]{0,400}?aria-expanded="false"/, '思考块默认收起')
 
   // 回合结束（有收尾节点）但任务仍未完成：那一项「进行中」的子任务保持展开；
   // 「任务过程」本身仍然是收起的，并把「未完成」标在折叠头上。
@@ -260,13 +261,18 @@ test('SSR：正在写的块展开；任务过程与任务列表始终收起', (t
     { sessionId: 'ssr-live-done', session: { running: false } },
   )
   assert.match(done, /data-status="completed"/)
-  // 全部完成的回合：**没有任何折叠体默认展开**（任务过程、任务列表、任务行、思考块全收起）——
-  // 这就是用户本轮要求的「任务列表默认收起 / 一个任务或一个节点完成后自动折叠」。
+  // 全部完成的回合：任务行与思考块都不再展开（「完成后自动折叠」）；
+  // 任务列表快照面板仍然展开（用户要求它默认展开，它是状态板）。
   assert.equal((done.match(/class="dcf-taskrow" data-status="in_progress" aria-expanded="true"/g) ?? []).length, 0)
   assert.equal(
-    (done.match(/class="dcf-fold" data-open="true"/g) ?? []).length,
+    (done.match(/class="dcf-row dcf-thinkinghead" aria-expanded="true"/g) ?? []).length,
     0,
-    '已完成的回合里不应有默认展开的折叠块（chevron 的 data-open 不算）',
+    '已完成的回合里不应有展开的思考块',
+  )
+  assert.equal(
+    (done.match(/class="dcf-platehead" aria-expanded="true"/g) ?? []).length,
+    2,
+    '两块任务列表快照都默认展开',
   )
 })
 

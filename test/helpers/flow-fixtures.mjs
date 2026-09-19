@@ -156,6 +156,17 @@ export function contextNode(key, turn, step, text, source = { kind: 'plugin', pl
 }
 
 /**
+ * 系统提示词节点。
+ *
+ * 形状来自核心 `system-prompt` Definition 的 `buildViewNode`：`{text: state.prompt.system}`
+ * （`dsh-client-ui-chat/lib/client.js:5837`）——它的正文在 `data.text`，
+ * 不像 `context` 那样在 `data.content` 数组里。
+ */
+export function systemPromptNode(key, turn, step, text) {
+  return envelope(key, turn, step, 'system-prompt', { text })
+}
+
+/**
  * 回合尾部节点（`turn/end` 之后的收尾控制器）。
  *
  * 本插件**自己**接管这个 kind（阶段折叠就是它的替代品），所以它的 data 只参与「回合是否已结束」

@@ -61,13 +61,16 @@ test('停在顶部不会自己反复触发（否则会把全部历史一次拉�
   assert.equal(calls.length, 1, '未离开顶部就不算新的触顶')
 })
 
-test('离开顶部再回到顶部可以再次加载', () => {
-  const { fake, calls } = probeScroller({}, { scrollTop: 500 })
-  fake.setTop(10)
+test('锚点滚出视口再回来可以再次加载（防重复触发的闸门）', () => {
+  const { fake, calls } = probeScroller({}, { scrollTop: 500, anchorBottom: 400, withAnchor: true })
   fake.fire()
-  fake.setTop(400)
+  assert.equal(calls.length, 1)
+  // 用户往下读：加载锚点被推出视口上方 → 重新武装，但**不**立刻加载。
+  fake.setAnchorBottom(-120)
   fake.fire()
-  fake.setTop(20)
+  assert.equal(calls.length, 1)
+  // 用户再滚回最上面：锚点重新可见 → 加载一次。
+  fake.setAnchorBottom(400)
   fake.fire()
   assert.equal(calls.length, 2)
 })
@@ -128,4 +131,19 @@ test('挂载时注册、卸载时移除滚动监听', () => {
   assert.equal(fake.listenerCount(), 1)
   harness.unmount()
   assert.equal(fake.listenerCount(), 0)
+})
+
+test('加载锚点在视口内才触发；锚点滚出视口后重新武装', () => {
+  // 锚点在视口内（bottom 400 > 宿主 top 0）= 用户滚到了最上面。
+  const inside = probeScroller({}, { scrollTop: 10, anchorBottom: 400, withAnchor: true })
+  inside.fake.fire()
+  assert.equal(inside.calls.length, 1, '锚点可见时触发加载')
+
+  // 锚点在视口上方（bottom -50）= 用户读下面的内容 → 不加载，但重新武装。
+  const outside = probeScroller({}, { scrollTop: 10, anchorBottom: -50, withAnchor: true })
+  outside.fake.fire()
+  assert.equal(outside.calls.length, 0, '锚点不可见时不加载')
+  outside.fake.setAnchorBottom(400)
+  outside.fake.fire()
+  assert.equal(outside.calls.length, 1, '锚点回到视口后加载一次')
 })

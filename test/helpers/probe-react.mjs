@@ -136,6 +136,8 @@ export function createFakeScroller(options = {}) {
     getBoundingClientRect: () => ({ top: anchorTops.get(turn) ?? 0 }),
   }))
 
+  const loadAnchorTops = { bottom: options.anchorBottom ?? 400 }
+  const loadAnchor = { getBoundingClientRect: () => ({ top: loadAnchorTops.bottom, bottom: loadAnchorTops.bottom }) }
   const root = {
     parentElement: scroller,
     closest: (selector) => (selector === '[data-conversation-scroll]' ? scroller : null),
@@ -148,6 +150,7 @@ export function createFakeScroller(options = {}) {
         return anchors.find((anchor) => anchor.getAttribute('data-turn-anchor') === byValue[1]) ?? null
       }
       if (selector === '[data-turn-anchor]') return anchors[0] ?? null
+      if (selector === '[data-dcf-load-anchor]') return options.withAnchor === false ? null : loadAnchor
       return null
     },
   }
@@ -162,6 +165,10 @@ export function createFakeScroller(options = {}) {
     /** 设置滚动位置。 */
     setTop(value) {
       scroller.scrollTop = value
+    },
+    /** 改变「加载更早」锚点的视口位置（模拟它滚出/回到视口）。 */
+    setAnchorBottom(value) {
+      loadAnchorTops.bottom = value
     },
     /** 改变某个回合锚点的视口位置（模拟内容变长）。 */
     setAnchorTop(turn, top) {

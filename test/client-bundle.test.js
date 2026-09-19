@@ -238,23 +238,62 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
   assert.deepEqual(foldStates(after), ['false', 'true', 'true', 'true', 'false'], '手动展开「思考」块后应保持展开')
 })
 
-test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {
+test('jumpToTurn：只滚会话体、不用 scrollIntoView，并尊重「减少动态效果」', () => {
   const { jumpToTurn } = client.__internals
   const calls = []
-  const target = { scrollIntoView: (options) => calls.push(options) }
-  const root = { querySelector: (selector) => (selector === '[data-turn-anchor="3"]' ? target : null) }
+  const scroller = {
+    scrollTop: 100,
+    getBoundingClientRect: () => ({ top: 0 }),
+    scrollTo: (options) => {
+      calls.push(options)
+      scroller.scrollTop = options.top
+    },
+  }
+  const target = {
+    // 真实 DOM 里行的视口位置随滚动变化（这里行在内容坐标 500 处）。
+    getBoundingClientRect: () => ({ top: 500 - scroller.scrollTop }),
+    // 一旦被调用就会把外层盒子（含输入框）一起滚掉——必须永远不调用。
+    scrollIntoView: (options) => calls.push({ scrollIntoView: options }),
+  }
+  const root = {
+    querySelector: (selector) => (selector === '[data-turn-anchor="3"]' ? target : null),
+    closest: (selector) => (selector === '[data-conversation-scroll]' ? scroller : null),
+  }
 
   window0.matchMedia = () => ({ matches: true })
   jumpToTurn(root, 3)
-  assert.deepEqual(calls, [{ block: 'start', behavior: 'auto' }], '开了减少动态效果就瞬时跳')
+  // 当前 scrollTop=100 → 行的视口 top=400；落位留 24px 空隙 → 100 + (400 - 24) = 476。
+  assert.deepEqual(calls, [{ top: 476, behavior: 'auto' }], '开了减少动态效果就瞬时跳')
+  assert.equal(
+    calls.some((call) => 'scrollIntoView' in call),
+    false,
+    '绝不能退化成 scrollIntoView：它会连外层盒子（含输入框）一起滚',
+  )
 
+  // 已经在位上（行的视口 top 正好等于 24）→ 不再产生滚动。
+  const settled = calls.length
   window0.matchMedia = () => ({ matches: false })
   jumpToTurn(root, 3)
-  assert.deepEqual(calls[1], { block: 'start', behavior: 'smooth' })
+  assert.equal(calls.length, settled, '目标已经在落位点上 → 不产生滚动')
 
-  // 目标不存在时不能抛（回合可能还没渲染，或者锚点刚好不在）。
+  // 再往上滚一段后跳转，应当是平滑滚动。
+  scroller.scrollTop = 200
+  jumpToTurn(root, 3)
+  assert.deepEqual(calls[settled], { top: 476, behavior: 'smooth' })
+
+  // 目标不存在 / 根为空 / 没有可滚盒子时都不能抛。
   assert.doesNotThrow(() => jumpToTurn(root, 99))
   assert.doesNotThrow(() => jumpToTurn(null, 1))
+  assert.doesNotThrow(() =>
+    jumpToTurn(
+      {
+        querySelector: () => ({ getBoundingClientRect: () => ({ top: 0 }) }),
+        closest: () => null,
+        parentElement: null,
+      },
+      1,
+    ),
+  )
 })
 
 test('样式契约：折叠有过渡且收起时不可见，并尊重 reduced-motion', () => {

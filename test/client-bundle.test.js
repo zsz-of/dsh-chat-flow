@@ -274,3 +274,40 @@ test('localStorage 不可用时仍然能装载（折叠状态退化成内存）'
   const flow = internals.deriveFlow(makeSnapshot([userNode('u1', 1, 'hi')]))
   assert.equal(flow.turns.length, 1)
 })
+
+test('导轨：未加载刻度点击后按 seq 翻页，已加载刻度直接滚动', () => {
+  const { view, t } = bootView()
+  const jumps = []
+  const tree = view.component({
+    sessionId: 'session-rail-jump',
+    t,
+    useChat: (selector) => selector(makeSnapshot([userNode('u3', 3, '第三件事')])),
+    useSession: () => ({ hasMore: true, loadingOlder: false }),
+    useProjection: () => [
+      { turn: 1, seq: 10, prompt: '第一件', response: '' },
+      { turn: 3, seq: 30, prompt: '第三件', response: '' },
+    ],
+    loadThrough: (seq) => {
+      jumps.push(seq)
+      return Promise.resolve()
+    },
+  })
+  const unloaded = findElement(tree, (element) => element.props?.['data-loaded'] === 'false')
+  assert.ok(unloaded !== undefined, '应渲染未加载刻度')
+  assert.equal(unloaded.props['aria-label'], '加载并跳到第 1 轮')
+  unloaded.props.onClick()
+  assert.deepEqual(jumps, [10], '未加载刻度应按该轮的 seq 翻页')
+})
+
+test('没有 turnOutline 时导轨退化成只画已加载回合', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-rail-loaded-only',
+    t,
+    useChat: (selector) => selector(makeSnapshot([userNode('u1', 1, '一'), userNode('u2', 2, '二')])),
+    useSession: () => ({ hasMore: false, loadingOlder: false }),
+    useProjection: () => undefined,
+  })
+  assert.equal(findElement(tree, (element) => element.props?.['data-loaded'] === 'false'), null)
+  assert.equal(findElement(tree, (element) => element.props?.['data-loaded'] === 'true') !== undefined, true, '已加载刻度照常渲染')
+})

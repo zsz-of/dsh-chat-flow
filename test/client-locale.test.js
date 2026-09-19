@@ -38,8 +38,14 @@ async function readShards() {
   return shards
 }
 
-/** 字典条目语法：`'flow.x':`（键后紧跟冒号）。剥掉它，剩下的才是引用点。 */
-const DICTIONARY_ENTRY = /['"](?:flow|view)\.[A-Za-z0-9_.]+['"]\s*:/g
+/**
+ * 字典条目语法：**行首缩进后**直接是 `'flow.x':`（键后紧跟冒号）。
+ *
+ * 必须锚定行首：三元表达式 `cond ? 'flow.rail.jump' : 'flow.rail.jumpLoad'` 里
+ * 冒号前的那个字面量长得和字典键一样，不锚定就会把**真实引用**误当成字典条目剥掉，
+ * 于是报出「已定义但无人引用」的假警。
+ */
+const DICTIONARY_ENTRY = /^[ \t]*['"](?:flow|view)\.[A-Za-z0-9_.]+['"]\s*:/gm
 
 /** 收集分片里所有 `'flow.*'` / `'view.*'` 用法字面量。 */
 function collectKeys(text) {

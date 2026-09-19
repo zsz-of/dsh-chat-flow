@@ -137,6 +137,7 @@ function render(snapshot, options = {}) {
       t,
       useChat: (selector) => selector(snapshot),
       useSession: () => ({ hasMore: false, loadingOlder: false, running: false, ...(options.session ?? {}) }),
+      useProjection: () => options.outline,
       loadOlder: () => {},
     }),
   )
@@ -314,4 +315,21 @@ test('SSR：展开态用真实 primitives 渲染出工具明细（不崩、看�
   assert.match(html, /node --test/)
   assert.match(html, /all green/)
   assert.match(html, /思考完成/)
+})
+
+test('SSR：turnOutline 里的未加载回合也画刻度，并标出「加载并跳转」', (t) => {
+  if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
+  // 已加载第 3 轮，outline 里有第 1–3 轮：第 1、2 轮是未加载刻度。
+  const html = render(makeSnapshot([userNode('u3', 3, '第三件事')]), {
+    outline: [
+      { turn: 1, seq: 10, prompt: '第一件事', response: '' },
+      { turn: 2, seq: 20, prompt: '第二件事', response: '' },
+      { turn: 3, seq: 30, prompt: '第三件事', response: '' },
+    ],
+  })
+  assert.match(html, /class="dcf-rail"/)
+  assert.equal((html.match(/data-loaded="false"/g) ?? []).length, 2, '两个未加载刻度')
+  assert.equal((html.match(/data-loaded="true"/g) ?? []).length, 1, '一个已加载刻度')
+  assert.match(html, /aria-label="加载并跳到第 1 轮"/)
+  assert.match(html, /aria-label="跳到第 3 轮"/)
 })

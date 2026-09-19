@@ -32,6 +32,8 @@ function probeScroller(options, scrollerOptions = {}) {
     loadingOlder: options.loadingOlder ?? false,
     loadOlder: () => calls.push(fake.scroller.scrollTop),
     turns: options.turns ?? [1, 2],
+    /** 窗口头 seq：加载历史时它会变小，锚定补偿只在「真的前插了」时发生。 */
+    firstSeq: options.firstSeq ?? 100,
   }
   const harness = mount(function Probe() {
     return useScroller(rootRef, state)
@@ -96,22 +98,64 @@ test('上一次加载还没结束时不重复触发', () => {
 })
 
 test('加载更早内容后把阅读位置补偿回去（锚定）', () => {
-  const { harness, fake, state } = probeScroller({}, { scrollTop: 20, anchorTops: { 1: -40, 2: 300 } })
+  const { harness, fake, state } = probeScroller(
+    { firstSeq: 100 },
+    { scrollTop: 20, nodeRows: [{ key: 'n1', top: -40 }, { key: 'n2', top: 300 }] },
+  )
   fake.fire()
-  // 前插内容会把原有内容往下推：第一个回合的锚点从 -40 被推到 160。
-  fake.setAnchorTop(1, 160)
+  // 前插落地：窗口头 seq 变小，并且原有内容被整体往下推 200px。
+  fake.setNodeRowTop('n1', 160)
+  fake.setNodeRowTop('n2', 500)
+  state.firstSeq = 60
   const before = fake.scroller.scrollTop
   harness.render()
   assert.equal(fake.scroller.scrollTop, before + 200, 'scrollTop 应加上被推下的距离，读者停在原处')
-  assert.equal(state.hasMore, true)
 })
 
-test('锚定在位置没变时不改滚动位置', () => {
-  const { harness, fake } = probeScroller({}, { scrollTop: 20 })
+test('锚定：窗口头没往前挪时不做补偿（否则每次渲染都会抖）', () => {
+  const { harness, fake } = probeScroller(
+    { firstSeq: 100 },
+    { scrollTop: 20, nodeRows: [{ key: 'n1', top: -40 }, { key: 'n2', top: 300 }] },
+  )
   fake.fire()
+  // 只是重渲染（流式追加、折叠状态变化…）：位置没变 → 不动滚动位置。
   const before = fake.scroller.scrollTop
   harness.render()
   assert.equal(fake.scroller.scrollTop, before)
+  // 就算 firstSeq 变了，只要锚点行没被推动，仍然是零补偿。
+  fake.setNodeRowTop('n1', 160)
+  const again = fake.scroller.scrollTop
+  harness.render()
+  assert.equal(fake.scroller.scrollTop, again)
+})
+
+test('锚定：一次加载里的多批前插都持续钉住同一个节点', () => {
+  const { harness, fake, state } = probeScroller(
+    { firstSeq: 100 },
+    { scrollTop: 20, nodeRows: [{ key: 'n1', top: -40 }, { key: 'n2', top: 300 }] },
+  )
+  fake.fire()
+  assert.equal(fake.scroller.scrollTop, 20, '触发时不动位置（只记录锚点）')
+  state.loadingOlder = true
+  // 第一批前插：窗口头 100 → 80，内容整体下移 100。
+  fake.setNodeRowTop('n1', 60)
+  fake.setNodeRowTop('n2', 400)
+  state.firstSeq = 80
+  harness.render()
+  assert.equal(fake.scroller.scrollTop, 120, '第一批前插后读者仍停在原处')
+  // 还在加载中 → 锚点按新位置重新记录；第二批前插（80 → 60，再下移 100）继续补偿。
+  fake.setNodeRowTop('n1', 160)
+  fake.setNodeRowTop('n2', 500)
+  state.firstSeq = 60
+  harness.render()
+  assert.equal(fake.scroller.scrollTop, 220, '第二批前插也要补偿（同一节点继续钉住）')
+  // 加载结束：锚点消费掉，之后再渲染不动滚动位置。
+  state.loadingOlder = false
+  harness.render()
+  fake.setNodeRowTop('n2', 900)
+  const settled = fake.scroller.scrollTop
+  harness.render()
+  assert.equal(fake.scroller.scrollTop, settled)
 })
 
 test('滚动时跟踪视口顶部所在的回合', () => {

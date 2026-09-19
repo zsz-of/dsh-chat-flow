@@ -436,13 +436,67 @@ test('回合已结束时，未完成的任务仍被标记为 unfinished', () => 
   ).turns[0]
   assert.equal(group.closed, true)
   assert.equal(group.unfinished, true)
-  // turn-tail 交给原生渲染（复制/点赞/点踩/分支按钮在它里面）；只有 turn-process 由本插件接管。
+  // turn-tail 交给原生渲染（复制/点赞/点踩/分支按钮在它里面），但**不进任何折叠体**：
+  // 派生层把它摘进 footerNodes，渲染层固定在「总结之后」渲染它。
   assert.deepEqual(
     seatNodesOf([...group.segments[0].nodes, ...group.closing]).map((node) => node.kind),
-    ['tool-call', 'turn-tail'],
+    ['tool-call'],
   )
-  // `liveKey` 指向本回合最后一个节点：渲染层用它判定「哪一块还在写」（思考中 vs 思考已完成）。
-  assert.equal(group.liveKey, 'tt1')
+  assert.deepEqual(group.footerNodes.map((node) => node.kind), ['turn-tail'])
+  // `liveKey` 指向本回合最后一个**参与折叠**的节点（收尾节点不算）：渲染层用它判定「哪一块还在写」。
+  assert.equal(group.liveKey, 't1')
+})
+
+test('收尾节点不进过程折叠：单独成组，插不进任何段', () => {
+  const group = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [{ content: '任务A', status: 'completed' }]),
+      assistantNode('a1', 1, 2, [{ kind: 'text', text: '做完了' }]),
+      turnTailNode('tt1', 1, 3),
+    ]),
+  ).turns[0]
+  assert.equal(group.planned, true)
+  assert.deepEqual(group.footerNodes.map((node) => node.key), ['tt1'])
+  assert.equal(
+    group.closing.some((node) => node.kind === 'turn-tail'),
+    false,
+    '收尾节点必须从 closing 里摘出去，否则会被折进「任务过程」',
+  )
+  assert.equal(
+    group.segments.some((segment) => segment.nodes.some((node) => node.kind === 'turn-tail')),
+    false,
+  )
+  assert.equal(group.looseNodes.some((node) => node.kind === 'turn-tail'), false)
+})
+
+test('子 agent 卡片：结果文本是 `started subagent <uuid>` 时不再抛（历史里的真实形状）', () => {
+  const childId = '11111111-2222-3333-4444-555555555555'
+  const group = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      subagentCallNode('s1', 1, 1, '去研究一下', `started subagent ${childId}`),
+      contextNode('c1', 1, 2, '子 agent 报告正文', {
+        kind: 'subagent-settled',
+        senderSessionId: childId,
+        summary: '完成了',
+      }),
+    ]),
+  ).turns[0]
+
+  const entry = processEntries(group.looseNodes, group.subagents).find((item) => item.kind === 'tool')
+  assert.ok(entry !== undefined, '子 agent 调用应有一条明细')
+  assert.equal(entry.card.childId, childId)
+  assert.equal(entry.card.status, 'done', '拿到结算通知 → 已结算')
+  assert.equal(entry.card.report.text, '子 agent 报告正文')
+
+  // 报告还没到的情形（后台派发）：只带 uuid、没有通知，也不能抛。
+  const alone = deriveFlow(
+    makeSnapshot([userNode('u2', 2, '再干'), subagentCallNode('s2', 2, 1, '再去', `started subagent ${childId}`)]),
+  ).turns[0]
+  const lonely = processEntries(alone.looseNodes, alone.subagents).find((item) => item.kind === 'tool')
+  assert.equal(lonely.card.status, 'started')
+  assert.equal(lonely.card.report, undefined)
 })
 
 test('cutOffOf：被取消/中断的过程认得出，正常结束的认不出', () => {

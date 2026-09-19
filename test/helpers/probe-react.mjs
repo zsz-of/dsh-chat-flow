@@ -151,10 +151,28 @@ export function createFakeScroller(options = {}) {
 
   const loadAnchorTops = { bottom: options.anchorBottom ?? 400 }
   const loadAnchor = { getBoundingClientRect: () => ({ top: loadAnchorTops.bottom, bottom: loadAnchorTops.bottom }) }
+
+  /**
+   * 节点行：本视图的每一行（`.dcf-leaf`）都带 `data-chat-anchor-key`，加载历史时的**阅读锚点**
+   * 就是按它记录的（核心同款属性）。位置可被 `setNodeRowTop` 改动，用来模拟「前插把内容推下去」。
+   */
+  const nodeTops = new Map()
+  for (const row of options.nodeRows ?? [{ key: 'n1', top: -40 }, { key: 'n2', top: 300 }]) {
+    nodeTops.set(row.key, row.top)
+  }
+  const nodeRows = [...nodeTops.keys()].map((key) => ({
+    getAttribute: (name) => (name === 'data-chat-anchor-key' ? key : null),
+    getBoundingClientRect: () => ({ top: nodeTops.get(key) ?? 0 }),
+  }))
+
   const root = {
     parentElement: scroller,
     closest: (selector) => (selector === '[data-conversation-scroll]' ? scroller : null),
-    querySelectorAll: (selector) => (selector === '[data-turn-anchor]' ? anchors : []),
+    querySelectorAll: (selector) => {
+      if (selector === '[data-turn-anchor]') return anchors
+      if (selector === '[data-chat-anchor-key]') return nodeRows
+      return []
+    },
     querySelector: (selector) => {
       // 视图里用到两种选择器形态，都要支持：[data-turn-anchor]（第一个锚点）
       // 与 [data-turn-anchor="N"]（按回合号定位）。
@@ -186,6 +204,10 @@ export function createFakeScroller(options = {}) {
     /** 改变某个回合锚点的视口位置（模拟内容变长）。 */
     setAnchorTop(turn, top) {
       anchorTops.set(turn, top)
+    },
+    /** 改变某个节点行的视口位置（模拟前插把内容往下推）。 */
+    setNodeRowTop(key, top) {
+      nodeTops.set(key, top)
     },
     listenerCount: () => listeners.get('scroll')?.size ?? 0,
   }

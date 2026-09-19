@@ -45,6 +45,7 @@ import {
   pwshNode,
   todoNode,
   toolNode,
+  turnTailNode,
   userNode,
   writeNode,
 } from './helpers/flow-fixtures.mjs'
@@ -207,9 +208,9 @@ test('SSR：任务状态与「正在处理」统计随节点数据变化', (t) =
   assert.match(html, /echo a/)
 })
 
-test('SSR：进行中的任务与「正在处理」默认展开，全部完成后自动折叠', (t) => {
+test('SSR：正在写的块展开；任务过程与任务列表始终收起', (t) => {
   if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
-  const unfinished = makeSnapshot([
+  const running = makeSnapshot([
     userNode('u1', 1, '干活'),
     todoNode('p1', 1, 1, [
       { content: '任务A', status: 'in_progress' },
@@ -217,16 +218,30 @@ test('SSR：进行中的任务与「正在处理」默认展开，全部完成�
     ]),
     pwshNode('t1', 1, 2, 'echo a', 'a'),
   ])
-  // 会话正在跑：进行中的任务行与其「正在处理」都默认展开。
-  const live = render(unfinished, { sessionId: 'ssr-live-open', session: { running: true } })
+  // 会话正在跑：进行中的任务行与正在写的那一块展开；「任务过程」始终收起（用户要求）。
+  const live = render(running, { sessionId: 'ssr-live-open', session: { running: true } })
   assert.match(live, /data-status="in_progress"/)
   assert.match(live, /aria-expanded="true"/, '进行中的任务行应展开')
   assert.match(live, /<div class="dcf-fold" data-open="true">/)
+  assert.match(live, /思考中/, '还在写的那一块显示「思考中」')
 
-  // 回合结束但任务仍未完成：仍然保持展开——「进行中」是按任务状态判定的，不是按回合。
-  const settledButUnfinished = render(unfinished, { sessionId: 'ssr-live-settled', session: { running: false } })
+  // 回合结束（有收尾节点）但任务仍未完成：那一项「进行中」的子任务保持展开；
+  // 「任务过程」本身仍然是收起的，并把「未完成」标在折叠头上。
+  const settledButUnfinished = render(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [
+        { content: '任务A', status: 'in_progress' },
+        { content: '任务B', status: 'pending' },
+      ]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      turnTailNode('tt1', 1, 3),
+    ]),
+    { sessionId: 'ssr-live-settled', session: { running: false } },
+  )
   assert.match(settledButUnfinished, /data-status="in_progress"/)
   assert.match(settledButUnfinished, /aria-expanded="true"/)
+  assert.match(settledButUnfinished, /未完成/)
 
   // 全部完成后：任务行与「正在处理」都自动收起。
   const done = render(

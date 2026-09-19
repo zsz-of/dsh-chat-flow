@@ -196,13 +196,12 @@ test('默认展开策略：正在写的块展开、任务列表与明细收起',
   })
   assert.match(collectText(tree), /任务A/)
   assert.match(collectText(tree), /进行中/)
-  // 用户本轮定下的默认策略：任务过程展开（回合在跑）、任务行展开（就是当前那一项）、
-  // 思考块展开（这一块里还包含着正在写的最后一个节点）；
-  // **任务列表快照面板默认收起**，卡片自己的明细也收起（一行一条，要点开才看）。
+  // 用户本轮定下的默认策略：**任务过程始终折叠**（即使在跑）；任务行展开（就是当前那一项）；
+  // 思考块展开（这一块里还包含着正在写的最后一个节点）；任务列表快照面板收起；卡片明细也收起。
   assert.deepEqual(
     foldStates(tree),
-    ['true', 'false', 'true', 'true', 'false'],
-    '任务过程 / 任务行 / 思考块展开；快照面板与卡片明细收起',
+    ['false', 'false', 'true', 'true', 'false'],
+    '任务过程与快照面板收起；任务行 / 思考块展开；卡片明细收起',
   )
   assert.match(collectText(tree), /live-command/)
 })
@@ -222,7 +221,7 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
     useSession: () => ({ hasMore: false, running: true }),
   }
   const before = view.component(props)
-  assert.deepEqual(foldStates(before), ['true', 'false', 'true', 'true', 'false'], '任务过程 / 任务行 / 思考块展开；快照面板与卡片明细收起')
+  assert.deepEqual(foldStates(before), ['false', 'false', 'true', 'true', 'false'], '任务过程与快照面板收起；任务行 / 思考块展开')
 
   // 点「思考中」那一行 → 收起它。
   const procRow = findElement(
@@ -233,7 +232,7 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
   procRow.props.onClick()
 
   const after = view.component({ ...props, t })
-  assert.deepEqual(foldStates(after), ['true', 'false', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
+  assert.deepEqual(foldStates(after), ['false', 'false', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
 })
 
 test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {
@@ -654,6 +653,7 @@ function turnGroup(overrides = {}) {
     segments: [],
     looseNodes: [],
     closing: [],
+    footerNodes: [],
     subagents: { notices: new Map(), consumed: new Set() },
     stats: { counts: { thinking: 0, command: 0, file: 0, mcp: 0, question: 0 }, listed: 0 },
     ...overrides,
@@ -790,4 +790,93 @@ test('视图层错误边界：本插件自己的渲染错误降级成错误摘�
   }
   assert.equal(warnings.length, 1, '必须留日志线索')
   assert.match(String(warnings[0][0]), /任务视图渲染失败/)
+})
+
+/**
+ * 某个元素在树里的「折叠层深」：0 = 不在任何折叠体里，1 = 在第一层折叠体里……
+ * 用来断言「收尾动作行没有被折进任务过程」。
+ *
+ * @param element - 根元素。
+ * @param predicate - 命中判定。
+ * @returns 层深；没找到时返回 -1。
+ */
+function foldDepthOf(element, predicate) {
+  let found = -1
+  const walk = (value, depth) => {
+    if (found >= 0 || value === null || value === undefined || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, depth)
+      return
+    }
+    const props = value.props ?? {}
+    if (predicate(value)) {
+      found = depth
+      return
+    }
+    walk(props.children, props.className === 'dcf-fold' ? depth + 1 : depth)
+  }
+  walk(element, 0)
+  return found
+}
+
+test('收尾动作行排在总结之后，且不在「任务过程」折叠体里', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-footer-order',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'completed' }]),
+          assistantNode('a1', 1, 2, [{ kind: 'text', text: '两件事都做完了' }]),
+          turnTailNode('tt1', 1, 3),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+
+  const turn = findElement(tree, (element) => element.props?.className === 'dcf-turn')
+  assert.ok(turn !== undefined, '应渲染出回合容器')
+  const children = (Array.isArray(turn.props.children) ? turn.props.children : [turn.props.children]).filter(Boolean)
+  const labels = children.map(
+    (child) => child.props?.['data-chat-flow-kind'] ?? child.props?.className,
+  )
+  assert.equal(labels[labels.length - 1], 'turn-tail', '收尾动作行是回合的最后一个子节点（总结之后）')
+  assert.equal(
+    labels.indexOf('turn-tail') === labels.lastIndexOf('turn-tail') ? 1 : 0,
+    1,
+    '收尾动作行只渲染一次',
+  )
+  assert.equal(
+    foldDepthOf(turn, (element) => element.props?.['data-chat-flow-kind'] === 'turn-tail'),
+    0,
+    '收尾动作行必须落在所有折叠体之外（用户报告过它跑进了「任务过程」）',
+  )
+  // 正文（总结）在收尾行之前，且正文本身也在折叠体之外。
+  assert.equal(foldDepthOf(turn, (element) => collectText(element).includes('两件事都做完了')), 0)
+})
+
+test('「任务过程」始终默认折叠（即使在跑）', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-stage-collapsed',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+  const stageRow = findElement(
+    tree,
+    (element) => String(element.props?.className ?? '').includes('dcf-row') && collectText(element).includes('任务过程'),
+  )
+  assert.ok(stageRow !== undefined, '应有「任务过程」折叠头')
+  assert.equal(stageRow.props['aria-expanded'], false, '「任务过程」默认必须收起')
+  assert.match(collectText(stageRow), /任务耗时/, '收起时也要能看到耗时（实时计时仍写在折叠头上）')
 })

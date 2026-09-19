@@ -209,13 +209,13 @@ test('SSR：进行中的任务与「正在处理」默认展开，全部完成�
     pwshNode('t1', 1, 2, 'echo a', 'a'),
   ])
   // 会话正在跑：进行中的任务行与其「正在处理」都默认展开。
-  const live = render(unfinished, { session: { running: true } })
+  const live = render(unfinished, { sessionId: 'ssr-live-open', session: { running: true } })
   assert.match(live, /data-status="in_progress"/)
   assert.match(live, /aria-expanded="true"/, '进行中的任务行应展开')
   assert.match(live, /<div class="dcf-fold" data-open="true">/)
 
   // 回合结束但任务仍未完成：仍然保持展开——「进行中」是按任务状态判定的，不是按回合。
-  const settledButUnfinished = render(unfinished, { session: { running: false } })
+  const settledButUnfinished = render(unfinished, { sessionId: 'ssr-live-settled', session: { running: false } })
   assert.match(settledButUnfinished, /data-status="in_progress"/)
   assert.match(settledButUnfinished, /aria-expanded="true"/)
 
@@ -233,7 +233,7 @@ test('SSR：进行中的任务与「正在处理」默认展开，全部完成�
         { content: '任务B', status: 'completed' },
       ]),
     ]),
-    { session: { running: false } },
+    { sessionId: 'ssr-live-done', session: { running: false } },
   )
   assert.match(done, /data-status="completed"/)
   // 最后一块快照面板默认展开（读者关心当前进度），但**没有任何任务折叠体**是展开的。

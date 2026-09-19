@@ -42,6 +42,10 @@ const {
   nodeRowOf,
   groupProcessNodes,
   seatNodesOf,
+  cutOffOf,
+  observedRpcIdsOf,
+  pendingSeatsOf,
+  orderedNodes,
   deriveFlow,
   todosOfToolCall,
   diffTodos,
@@ -432,6 +436,74 @@ test('回合已结束时，未完成的任务仍被标记为 unfinished', () => 
   ).turns[0]
   assert.equal(group.closed, true)
   assert.equal(group.unfinished, true)
-  // turn-tail 是核心的收尾控制器，本插件用阶段折叠替代它，节点本身不进渲染序列。
-  assert.deepEqual(seatNodesOf([...group.segments[0].nodes, ...group.closing]).map((node) => node.kind), ['tool-call'])
+  // turn-tail 交给原生渲染（复制/点赞/点踩/分支按钮在它里面）；只有 turn-process 由本插件接管。
+  assert.deepEqual(
+    seatNodesOf([...group.segments[0].nodes, ...group.closing]).map((node) => node.kind),
+    ['tool-call', 'turn-tail'],
+  )
+  // `liveKey` 指向本回合最后一个节点：渲染层用它判定「哪一块还在写」（思考中 vs 思考已完成）。
+  assert.equal(group.liveKey, 'tt1')
+})
+
+test('cutOffOf：被取消/中断的过程认得出，正常结束的认不出', () => {
+  const interrupted = assistantNode('a2', 1, 3, [{ kind: 'reasoning', text: '写了一半' }])
+  interrupted.data.status = 'interrupted'
+  assert.equal(cutOffOf([interrupted]), true)
+  assert.equal(cutOffOf([assistantNode('a1', 1, 1, [{ kind: 'text', text: '完整' }])]), false)
+  assert.equal(cutOffOf([interruptedPwshNode('t9', 1, 4, 'sleep 1')]), true, '被取消的工具调用也算没善终')
+  assert.equal(cutOffOf([pwshNode('t1', 1, 2, 'echo a', 'a')]), false)
+  assert.equal(cutOffOf([]), false)
+  assert.equal(cutOffOf(undefined), false)
+})
+
+test('待发送 / 插队的消息：插队保留、本地回显落地后消失、排队的不进对话流', () => {
+  const snapshot = makeSnapshot([userNode('u1', 1, '干活')])
+  snapshot.nodes.get('u1').data.source = { kind: 'user', rpcId: 'rpc-landed' }
+
+  const seats = pendingSeatsOf(
+    [
+      { id: 'q1', placement: 'steering', content: [{ type: 'text', text: '插一句话' }] },
+      { id: 'q2', placement: 'next-turn', content: [{ type: 'text', text: '下一回合再说' }] },
+    ],
+    [
+      { requestId: 'rpc-pending', placement: 'steering', text: '刚发出去的' },
+      { requestId: 'rpc-landed', placement: 'steering', text: '已经落地了' },
+      { requestId: 'rpc-queued', placement: 'queued', text: '排队里的' },
+    ],
+    snapshot,
+  )
+  assert.deepEqual(
+    seats.map((seat) => [seat.kind, seat.text]),
+    [
+      ['steering', '插一句话'],
+      ['echo', '刚发出去的'],
+    ],
+    '插队消息保留；已落地的回显不再重复；queued 的交给输入区显示；非插队的队列项不进对话流',
+  )
+  // 队列项的 rpcId 也会被算作「已观测」，避免它同时以回显形式出现两遍（核心同义，CHAT:1959）。
+  const observed = observedRpcIdsOf(snapshot, [{ id: 'q3', rpcId: 'rpc-queued' }])
+  assert.equal(observed.has('rpc-queued'), true)
+  assert.equal(observed.has('rpc-landed'), true)
+  assert.equal(observed.has('rpc-unknown'), false)
+})
+
+test('渲染序只认 order：回滚后已移出呈现序的节点不再被画出来', () => {
+  const snapshot = makeSnapshot([
+    userNode('u1', 1, '第一件事'),
+    pwshNode('t1', 1, 1, 'echo 1', '1'),
+    userNode('u2', 2, '第二件事（回滚后应当消失）'),
+  ])
+  // 模拟回滚：order 去掉后面两条，nodes 这个 Map 里仍然留着旧条目。
+  snapshot.order = ['u1', 't1']
+  const flow = deriveFlow(snapshot)
+  assert.deepEqual(
+    flow.turns.map((group) => group.turn),
+    [1],
+    '只有还在呈现序里的回合被派生出来',
+  )
+  assert.equal(
+    orderedNodes(snapshot).map((node) => node.key).join(','),
+    'u1,t1',
+    '派生序与核心的 order 一致（不再补渲染 Map 里的残留节点）',
+  )
 })

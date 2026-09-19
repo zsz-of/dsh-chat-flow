@@ -15,6 +15,7 @@ import {
   makeSnapshot,
   pwshNode,
   todoNode,
+  turnTailNode,
   userNode,
   writeNode,
 } from './helpers/flow-fixtures.mjs'
@@ -180,7 +181,7 @@ function findElement(element, predicate) {
   return found
 }
 
-test('默认展开策略：进行中的任务与其「正在处理」都展开，明细可见', () => {
+test('默认展开策略：正在写的块展开、任务列表与明细收起', () => {
   const { view, t } = bootView()
   const snapshot = makeSnapshot([
     userNode('u1', 1, '做点事'),
@@ -195,9 +196,14 @@ test('默认展开策略：进行中的任务与其「正在处理」都展开�
   })
   assert.match(collectText(tree), /任务A/)
   assert.match(collectText(tree), /进行中/)
-  // 三个块在「进行中」时展开：规划过程 / 任务行 / 正在处理；
-  // 剩下那个收起的是**某条操作自己的明细**（一行一条之后还要再点才展开，这是刻意的）。
-  assert.deepEqual(foldStates(tree), ['true', 'true', 'true', 'true', 'false'], '任务过程 / 快照面板 / 任务行 / 思考块展开，卡片明细收起')
+  // 用户本轮定下的默认策略：任务过程展开（回合在跑）、任务行展开（就是当前那一项）、
+  // 思考块展开（这一块里还包含着正在写的最后一个节点）；
+  // **任务列表快照面板默认收起**，卡片自己的明细也收起（一行一条，要点开才看）。
+  assert.deepEqual(
+    foldStates(tree),
+    ['true', 'false', 'true', 'true', 'false'],
+    '任务过程 / 任务行 / 思考块展开；快照面板与卡片明细收起',
+  )
   assert.match(collectText(tree), /live-command/)
 })
 
@@ -216,9 +222,9 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
     useSession: () => ({ hasMore: false, running: true }),
   }
   const before = view.component(props)
-  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'true', 'false'], '任务过程 / 快照面板 / 任务行 / 思考块展开，卡片明细收起')
+  assert.deepEqual(foldStates(before), ['true', 'false', 'true', 'true', 'false'], '任务过程 / 任务行 / 思考块展开；快照面板与卡片明细收起')
 
-  // 点「正在处理」那一行 → 收起它。
+  // 点「思考中」那一行 → 收起它。
   const procRow = findElement(
     before,
     (element) => String(element.props?.className ?? '').includes('dcf-row') && collectText(element).includes('思考'),
@@ -227,7 +233,7 @@ test('手动收起会被记住：覆盖默认展开策略', () => {
   procRow.props.onClick()
 
   const after = view.component({ ...props, t })
-  assert.deepEqual(foldStates(after), ['true', 'true', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
+  assert.deepEqual(foldStates(after), ['true', 'false', 'true', 'false', 'false'], '手动收起「思考」块后应保持收起')
 })
 
 test('jumpToTurn：按回合锚点定位并尊重「减少动态效果」', () => {
@@ -457,7 +463,7 @@ test('原生座位外面套着错误边界：失败时给出回退叶子，并�
   assert.match(String(warnings[0][0]), /原生节点座位渲染失败/)
 })
 
-test('原生座位：核心的收尾控制器节点（turn-tail / turn-process）不交给原生渲染', () => {
+test('原生座位：只接管 turn-process；turn-tail 必须交给原生（复制/点赞/点踩/分支按钮在里面）', () => {
   const { seatNodesOf } = client.__internals
   const kept = seatNodesOf([
     { key: 'a', kind: 'tool-call' },
@@ -467,7 +473,32 @@ test('原生座位：核心的收尾控制器节点（turn-tail / turn-process�
     undefined,
     { key: 'd', kind: 'user' },
   ])
-  assert.deepEqual(kept.map((node) => node.key), ['a', 'd'])
+  assert.deepEqual(kept.map((node) => node.key), ['a', 'b', 'd'], 'turn-tail 必须留给原生条目渲染')
+})
+
+test('原生座位：收尾节点真的被渲染成座位（entryKey = turn-tail）', () => {
+  const { view, t } = bootView()
+  const { calls, renderSlot } = seatSpy()
+  view.component({
+    sessionId: 'session-tail-seat',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'completed' }]),
+          assistantNode('a1', 1, 2, [{ kind: 'text', text: '做完了' }]),
+          turnTailNode('tt1', 1, 3),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false }),
+    renderSlot,
+  })
+  const tailCall = calls.find((call) => call.owner.node.kind === 'turn-tail')
+  assert.ok(tailCall !== undefined, 'turn-tail 必须经过原生座位（按钮由它渲染）')
+  assert.equal(tailCall.options.entryKey, 'turn-tail')
+  assert.equal(typeof tailCall.owner.forkAt, 'function', '分支按钮要 forkAt')
+  assert.equal(typeof tailCall.owner.inspectCall, 'function')
 })
 
 test('turnDataOfNode / turnOfChatNode：只有 turn 与 step 两种位置有回合数据', () => {
@@ -602,4 +633,161 @@ test('原生注入面：loadImage / fileMentions / forkAt 的可用与降级', a
   assert.equal(bare.loadImage, undefined)
   assert.equal(bare.fileMentions({ seq: 1 }), undefined)
   assert.doesNotThrow(() => bare.forkAt(1))
+})
+
+/* ──────────────────────────── 本轮修的行为 ──────────────────────────── */
+
+/** 造一个最小的回合模型（只带渲染层用到的字段）。 */
+function turnGroup(overrides = {}) {
+  return {
+    key: 'turn:1',
+    turn: 1,
+    input: undefined,
+    closed: false,
+    unfinished: false,
+    durationMs: 0,
+    startedAt: 1_000_000,
+    liveKey: null,
+    inputText: '',
+    planned: false,
+    planNodes: [],
+    segments: [],
+    looseNodes: [],
+    closing: [],
+    subagents: { notices: new Map(), consumed: new Set() },
+    stats: { counts: { thinking: 0, command: 0, file: 0, mcp: 0, question: 0 }, listed: 0 },
+    ...overrides,
+  }
+}
+
+test('任务耗时：正在跑的回合实时计时（0 分 0 秒起），结束的回合用派生值', () => {
+  const { views, formatDuration, ZH } = client.__internals
+  const t = (key, params) => {
+    const template = ZH[key] ?? key
+    if (!params) return template
+    return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
+  }
+  assert.match(formatDuration(0, t), /0分0秒/, '计时从 0 分 0 秒开始，分位始终显示')
+  assert.match(formatDuration(65_000, t), /1分5秒/)
+
+  const live = views.TurnGroup({
+    group: turnGroup(),
+    t,
+    sessionId: 'session-duration-live',
+    labels: {},
+    live: true,
+    seat: undefined,
+    now: 1_000_000 + 5_000,
+  })
+  assert.match(collectText(live), /任务耗时 0分5秒/, '正在跑的回合用 now - startedAt 实时算')
+
+  const settled = views.TurnGroup({
+    group: turnGroup({ closed: true, durationMs: 62_000 }),
+    t,
+    sessionId: 'session-duration-settled',
+    labels: {},
+    live: false,
+    seat: undefined,
+    now: 1_000_000 + 900_000,
+  })
+  assert.match(collectText(settled), /任务耗时 1分2秒/, '结束的回合用派生层的固定耗时，不再跟着时钟走')
+})
+
+test('插队 / 排队的消息在列表末尾有座位，并标出各自状态', () => {
+  const { view, t } = bootView()
+  const session = {
+    hasMore: false,
+    loadingOlder: false,
+    running: true,
+    queue: [{ id: 'q1', placement: 'steering', content: [{ type: 'text', text: '插一句话' }] }],
+    pendingSubmissions: [{ requestId: 'rpc-1', placement: 'steering', text: '刚发出去的' }],
+  }
+  const tree = view.component({
+    sessionId: 'session-pending',
+    t,
+    useChat: (selector) => selector(makeSnapshot([userNode('u1', 1, '干活')])),
+    useSession: (selector) => selector(session),
+  })
+  const text = collectText(tree)
+  assert.match(text, /插一句话/)
+  assert.match(text, /插队待处理/)
+  assert.match(text, /刚发出去的/)
+  const steeringSeat = findElement(tree, (element) => element.props?.['data-pending-steering'] === 'true')
+  assert.ok(steeringSeat !== undefined, '插队座位要带核心约定的 data-pending-steering（回退插件按它找座位）')
+
+  // 已经变成正式节点的那条不再以回显形式重复出现。
+  const landed = makeSnapshot([userNode('u1', 1, '干活')])
+  landed.nodes.get('u1').data.source = { kind: 'user', rpcId: 'rpc-1' }
+  const deduped = view.component({
+    sessionId: 'session-pending-2',
+    t,
+    useChat: (selector) => selector(landed),
+    useSession: (selector) => selector(session),
+  })
+  assert.equal(collectText(deduped).includes('刚发出去的'), false)
+  assert.match(collectText(deduped), /插一句话/, '插队项仍在队列里，照常显示')
+})
+
+test('取消键留下的半截过程：折叠体保持展开并标成「思考未完成」', () => {
+  const { view, t } = bootView()
+  const half = assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '写到一半就停了' }])
+  half.data.status = 'interrupted'
+  const tree = view.component({
+    sessionId: 'session-cut-off',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+          half,
+          turnTailNode('tt1', 1, 3),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+  const text = collectText(tree)
+  assert.match(text, /思考未完成/, '被打断的块要明确说是未完成，不能装作「已完成」')
+  assert.match(text, /写到一半就停了/, '内容必须还在（折叠体保持挂载且默认展开）')
+  const head = findElement(
+    tree,
+    (element) =>
+      String(element.props?.className ?? '').includes('dcf-thinkinghead') && collectText(element).includes('思考未完成'),
+  )
+  assert.equal(head.props['aria-expanded'], true, '被打断的块默认展开')
+})
+
+test('视图层错误边界：本插件自己的渲染错误降级成错误摘要，而非让整块视图让位', async () => {
+  // 这一条同样需要「createElement 不立刻调用组件」的探针 React 才能拿到边界元素本身。
+  const probeModule = await loadBundle({ react: createProbeReact().react })
+  const { views } = probeModule.exports.__internals
+  const t = (key) => key
+  const element = views.TaskFlowView({
+    t,
+    useChat: () => ({}),
+    useSession: () => ({}),
+  })
+  const Boundary = element.type
+  assert.equal(typeof Boundary.getDerivedStateFromError, 'function', 'TaskFlowView 必须把主体包在错误边界里')
+
+  assert.deepEqual(Boundary.getDerivedStateFromError(new Error('boom')), { failed: true, message: 'boom' })
+  assert.deepEqual(Boundary.getDerivedStateFromError('not-an-error'), { failed: true, message: 'not-an-error' })
+
+  const instance = new Boundary({ t, children: 'BODY' })
+  assert.equal(instance.render(), 'BODY', '正常时渲染视图主体')
+  instance.state = { failed: true, message: 'boom' }
+  const strip = instance.render()
+  assert.equal(strip.props['data-dcf-error'], 'boom')
+  assert.match(collectText(strip), /flow\.error\.title/)
+
+  const warnings = []
+  const originalWarn = console.warn
+  console.warn = (...args) => warnings.push(args)
+  try {
+    instance.componentDidCatch(new Error('boom'))
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.equal(warnings.length, 1, '必须留日志线索')
+  assert.match(String(warnings[0][0]), /任务视图渲染失败/)
 })

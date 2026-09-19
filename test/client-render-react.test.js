@@ -245,9 +245,14 @@ test('SSR：进行中的任务与「正在处理」默认展开，全部完成�
     { sessionId: 'ssr-live-done', session: { running: false } },
   )
   assert.match(done, /data-status="completed"/)
-  // 最后一块快照面板默认展开（读者关心当前进度），但**没有任何任务折叠体**是展开的。
+  // 全部完成的回合：**没有任何折叠体默认展开**（任务过程、任务列表、任务行、思考块全收起）——
+  // 这就是用户本轮要求的「任务列表默认收起 / 一个任务或一个节点完成后自动折叠」。
   assert.equal((done.match(/class="dcf-taskrow" data-status="in_progress" aria-expanded="true"/g) ?? []).length, 0)
-  assert.equal((done.match(/class="dcf-fold" data-open="true"/g) ?? []).length, 1, '折叠块里只有最后一块快照面板是展开的（chevron 的 data-open 不算）')
+  assert.equal(
+    (done.match(/class="dcf-fold" data-open="true"/g) ?? []).length,
+    0,
+    '已完成的回合里不应有默认展开的折叠块（chevron 的 data-open 不算）',
+  )
 })
 
 test('SSR：每个回合都带跳转锚点，多于一个回合时渲染右侧导轨', (t) => {
@@ -325,7 +330,9 @@ test('SSR：展开态用真实 primitives 渲染出工具明细（不崩、看�
   assert.match(html, /data-terminal/, '命令明细应该由真实的 TerminalBlock 渲染')
   assert.match(html, /node --test/)
   assert.match(html, /all green/)
-  assert.match(html, /思考完成/)
+  // 回合已结束 → 这一块不再显示「思考中」，而是「思考已完成」（用户要求）。
+  assert.match(html, /思考已完成/)
+  assert.equal(html.includes('思考中<'), false, '结束的块不该再显示「思考中」')
 })
 
 test('SSR：turnOutline 里的未加载回合也画刻度，并标出「加载并跳转」', (t) => {

@@ -261,18 +261,24 @@ test('SSR：任务列表默认展开；任务过程与思考块默认收起', (t
     { sessionId: 'ssr-live-done', session: { running: false } },
   )
   assert.match(done, /data-status="completed"/)
-  // 全部完成的回合：任务行与思考块都不再展开（「完成后自动折叠」）；
-  // 任务列表快照面板仍然展开（用户要求它默认展开，它是状态板）。
+  // 全部完成的回合：任务行与思考块都不再展开（「完成后自动折叠」）。
   assert.equal((done.match(/class="dcf-taskrow" data-status="in_progress" aria-expanded="true"/g) ?? []).length, 0)
   assert.equal(
     (done.match(/class="dcf-row dcf-thinkinghead" aria-expanded="true"/g) ?? []).length,
     0,
     '已完成的回合里不应有展开的思考块',
   )
+  // 任务列表：第一块（A 进行中 / B 未开始）默认展开；第二块**整表都已完成 → 默认收起**
+  // （用户要求「当任务列表更新为『全部已完成』状态时，不需要展开」）。
   assert.equal(
     (done.match(/class="dcf-platehead" aria-expanded="true"/g) ?? []).length,
-    2,
-    '两块任务列表快照都默认展开',
+    1,
+    '只有还没全部完成的那一块默认展开',
+  )
+  assert.equal(
+    (done.match(/class="dcf-platehead" aria-expanded="false"/g) ?? []).length,
+    1,
+    '全部完成的那一块默认收起',
   )
 })
 

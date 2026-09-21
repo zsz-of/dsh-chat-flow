@@ -16,6 +16,7 @@ import {
   makeSnapshot,
   pwshNode,
   steeringNode,
+  subagentCallNode,
   systemPromptNode,
   todoNode,
   turnTailNode,
@@ -982,7 +983,107 @@ test('「任务过程」跑动中默认展开且不允许关闭；任务结束�
   assert.equal(afterRow.props['aria-expanded'], true, '手动打开后保持打开')
 })
 
-/* ──────────────────────────── 本轮（第十轮）的行为 ──────────────────────────── */
+/* ──────────────────────────── 本轮（第十一轮）的行为 ──────────────────────────── */
+
+test('思考块只在**自己**被中断时写「被打断」，回合级的未收尾不会传染给它', () => {
+  const { view, t } = bootView()
+  // 一个「没善终」的回合：任务还是 in_progress，而且有后台子 agent 只回了 started 一行。
+  const childId = '11111111-2222-3333-4444-555555555555'
+  const tree = view.component({
+    sessionId: 'session-cutoff-scope',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+          subagentCallNode('s1', 1, 3, '去研究一下', `started subagent ${childId}`),
+          turnTailNode('tt1', 1, 4),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+
+  const heads = preorderOf(tree).filter((element) =>
+    String(element.props?.className ?? '').includes('dcf-thinkinghead'),
+  )
+  assert.ok(heads.length > 0, '应有思考块')
+  for (const head of heads) {
+    assert.equal(
+      collectText(head).includes('被打断'),
+      false,
+      '这一块自己没有被中断（工具都跑完了）→ 不能写「被打断」',
+    )
+    assert.match(collectText(head), /思考已完成/, '正常跑完的块写「思考已完成」')
+  }
+  // 回合级的「被打断」标记仍然挂在「任务过程」折叠头上（那里才是说回合整体的地方）。
+  const stageRow = findElement(
+    tree,
+    (element) => String(element.props?.className ?? '').includes('dcf-row') && collectText(element).includes('任务过程'),
+  )
+  assert.match(collectText(stageRow), /被打断/, '任务没做完 → 折叠头挂「被打断」')
+})
+
+test('子 agent 只回了 started 一行时，回合不算「被打断」', () => {
+  const { deriveFlow } = client.__internals
+  const childId = '11111111-2222-3333-4444-555555555555'
+  const group = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [{ content: '任务A', status: 'completed' }]),
+      subagentCallNode('s1', 1, 2, '去研究一下', `started subagent ${childId}`),
+      turnTailNode('tt1', 1, 3),
+    ]),
+  ).turns[0]
+  assert.equal(group.closed, true)
+  assert.equal(
+    group.unfinished,
+    false,
+    '后台子 agent 报告未到是正常情况，不该把整个回合标成「被打断」',
+  )
+})
+
+test('任务列表：整表都已完成的快照默认收起，未完成的仍然默认展开', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-plate-done-default',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [
+            { content: '任务A', status: 'in_progress' },
+            { content: '任务B', status: 'pending' },
+          ]),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+          todoNode('p2', 1, 3, [
+            { content: '任务A', status: 'completed' },
+            { content: '任务B', status: 'completed' },
+          ]),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+  const heads = preorderOf(tree).filter((element) =>
+    String(element.props?.className ?? '').includes('dcf-platehead'),
+  )
+  assert.equal(heads.length, 2, '两块任务列表快照')
+  assert.equal(heads[0].props['aria-expanded'], true, '还没全部完成的那块默认展开')
+  assert.equal(heads[1].props['aria-expanded'], false, '「全部已完成」的那块默认收起')
+})
+
+test('展开箭头：包裹盒与图标盒同尺寸并居中，旋转中心才是箭头中心', () => {
+  const { FLOW_CSS } = client.__internals
+  assert.match(
+    FLOW_CSS,
+    /\.dcf-chev\{[^}]*display:flex[^}]*align-items:center[^}]*justify-content:center/,
+    '箭头包裹盒用 flex 居中，避免 inline svg 被行高顶到基线上',
+  )
+  assert.match(FLOW_CSS, /\.dcf-chev>svg\{display:block\}/, 'svg 去掉行内基线的额外空隙')
+  assert.match(FLOW_CSS, /\.dcf-chev\{[^}]*transform-origin:center/, '显式写旋转中心为几何中心')
+})
 
 test('跑动中：过程中写的正文全在「任务过程」里，最外层不放正文', () => {
   const { view, t } = bootView()

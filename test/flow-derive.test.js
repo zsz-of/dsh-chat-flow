@@ -13,6 +13,7 @@ import { loadBundle } from './helpers/load-bundle.mjs'
 import {
   askNode,
   assistantNode,
+  blankAssistantNode,
   contextNode,
   editNode,
   interruptedPwshNode,
@@ -23,6 +24,7 @@ import {
   subagentCallNode,
   todoNode,
   toolNode,
+  turnProcessNode,
   turnTailNode,
   userNode,
   writeNode,
@@ -460,6 +462,40 @@ test('回合已结束时，未完成的任务仍被标记为 unfinished', () => 
   assert.deepEqual(group.footerNodes.map((node) => node.kind), ['turn-tail'])
   // `liveKey` 指向本回合最后一个**参与折叠**的节点（收尾节点不算）：渲染层用它判定「哪一块还在写」。
   assert.equal(group.liveKey, 't1')
+})
+
+test('第一个用户输入之前的节点不单独成组（最前端那个「无操作」的残留）', () => {
+  // 真实顺序：核心为回合合成的 `turn-process` 排在回合开始处，早于第一条 user/message。
+  // 它自成一组时会渲染成「任务耗时 + 无操作」的折叠头，而它的 turn 与第一回合同号，
+  // 时间线也一样——看起来就像第一回合的思考被复制了一份留在最前面。
+  const withPhantom = deriveFlow(
+    makeSnapshot([
+      turnProcessNode('tp1', 1, 1),
+      userNode('u1', 1, '干活'),
+      assistantNode('a1', 1, 1, [{ kind: 'reasoning', text: '想一下' }]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      turnTailNode('tt1', 1, 3),
+    ]),
+  )
+  assert.equal(withPhantom.turns.length, 1, '最前面不该多出一个分组')
+  assert.equal(withPhantom.turns[0].input?.key, 'u1', '唯一的那一组就是第一回合')
+
+  // 空助手步（没有正文也没有推理）同理：它不该让最前面多出一组。
+  const withBlankStep = deriveFlow(
+    makeSnapshot([
+      blankAssistantNode('b1', 1, 1),
+      userNode('u2', 1, '干活'),
+      assistantNode('a2', 1, 1, [{ kind: 'reasoning', text: '想一下' }]),
+    ]),
+  )
+  assert.equal(withBlankStep.turns.length, 1)
+
+  // ⚠️ 但**有内容**的孤儿节点必须保留：历史分页后窗口正好从回合中间开始，
+  // 那些节点本身是要看的，只是没有输入气泡。
+  const orphan = deriveFlow(makeSnapshot([pwshNode('t9', 9, 1, 'echo orphan', 'ok'), userNode('u3', 9, '下一个')]))
+  assert.equal(orphan.turns.length, 2, '没有输入气泡但有内容的组要保留')
+  assert.equal(orphan.turns[0].input, undefined)
+  assert.equal(orphan.turns[0].blank, false)
 })
 
 test('「被打断」只看最后一个任务列表的状态（用户裁决）', () => {

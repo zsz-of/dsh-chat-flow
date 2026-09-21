@@ -12,6 +12,7 @@ import { collectText, createStorage, loadBundle } from './helpers/load-bundle.mj
 import { createProbeReact } from './helpers/probe-react.mjs'
 import {
   assistantNode,
+  blankAssistantNode,
   contextNode,
   makeSnapshot,
   pwshNode,
@@ -19,6 +20,7 @@ import {
   subagentCallNode,
   systemPromptNode,
   todoNode,
+  turnProcessNode,
   turnTailNode,
   userNode,
   writeNode,
@@ -1120,6 +1122,68 @@ test('任务列表：整表都已完成的「当前那一版」也默认收起',
   assert.equal(heads.length, 2, '两块任务列表快照')
   assert.equal(heads[0].props['aria-expanded'], false, '旧块被接管 → 收起')
   assert.equal(heads[1].props['aria-expanded'], false, '「全部已完成」的当前那一版也默认收起')
+})
+
+test('对话最前端不出现「无操作」的残留思考块', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-blank-run',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          turnProcessNode('tp1', 1, 1),
+          userNode('u1', 1, '干活'),
+          blankAssistantNode('b1', 1, 1),
+          assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '真的在想' }]),
+          pwshNode('t1', 1, 3, 'echo a', 'a'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+  const text = collectText(tree)
+  assert.equal(/无操作/.test(text), false, '不该出现「无操作」的思考块')
+  assert.equal(
+    countIn(tree, (element) => String(element.props?.className ?? '').includes('dcf-turn')),
+    1,
+    '最前面不该多出一个分组',
+  )
+  assert.equal(
+    countIn(tree, (element) => String(element.props?.className ?? '').includes('dcf-thinkinghead')),
+    1,
+    '只有真正有内容的思考块才画',
+  )
+  assert.match(text, /真的在想/)
+})
+
+test('整块渲染成空的过程不画思考块（夹在正文之间的空白步）', () => {
+  const { view, t } = bootView()
+  // 空白步（没有正文也没有推理）被两段正文夹住 → 它**独占一个过程 run**，
+  // 画出来就是一个「无操作」的空思考块（用户报告过最前面那块残留）。
+  const tree = view.component({
+    sessionId: 'session-blank-run-alone',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          assistantNode('a1', 1, 1, [{ kind: 'text', text: '先说一句。' }]),
+          blankAssistantNode('b1', 1, 2),
+          assistantNode('a2', 1, 3, [{ kind: 'text', text: '再说一句。' }]),
+          assistantNode('a3', 1, 4, [{ kind: 'reasoning', text: '真的在想' }]),
+          pwshNode('t1', 1, 5, 'echo a', 'a'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+  const text = collectText(tree)
+  assert.equal(/无操作/.test(text), false, '空白的过程不画折叠头，也就不会出现「无操作」')
+  assert.equal(
+    countIn(tree, (element) => String(element.props?.className ?? '').includes('dcf-thinkinghead')),
+    1,
+    '只画真正有内容的那个思考块',
+  )
+  assert.match(text, /真的在想/)
 })
 
 test('展开箭头：包裹盒与图标盒同尺寸并居中，旋转中心才是箭头中心', () => {

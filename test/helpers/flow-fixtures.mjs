@@ -196,3 +196,19 @@ export function turnTailNode(key, turn, step, text = '做完了') {
     branchUnavailable: false,
   })
 }
+
+/**
+ * 核心为回合合成的「过程折叠」控制器节点（`turn-process`）。
+ *
+ * 本插件自己接管它（阶段折叠就是它的替代品，见 `OWNED_NODE_KINDS`），所以它不交给原生座位。
+ * ⚠️ 它的**位置**很关键：`turn/start` 早于第一条 `user/message`（本机实测 seq 5 vs 8），
+ * 所以它会排在第一个用户节点**之前**——这正是「对话最前面多出一个无操作的块」的成因。
+ */
+export function turnProcessNode(key, turn, step = 1) {
+  return envelope(key, turn, step, 'turn-process', { turn, open: true })
+}
+
+/** 没有正文也没有推理的助手步（核心对它 `return null`，渲染层也不该为它画思考块）。 */
+export function blankAssistantNode(key, turn, step) {
+  return envelope(key, turn, step, 'assistant-step', { status: 'settled', turn, step, blocks: [], time: 0 })
+}

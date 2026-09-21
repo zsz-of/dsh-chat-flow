@@ -195,7 +195,7 @@ test('嵌套子调用降级为通用卡（子结果没有退出码/差异可解�
   assert.equal(nested.isChild, true)
 })
 
-test('统计口径：思考 / 命令 / 编辑文件 / MCP / 提问，0 值不显示', () => {
+test('统计口径：思考 / 命令 / 读取文件 / 编辑文件 / MCP / 提问，0 值不显示', () => {
   const nodes = [
     assistantNode('a1', 1, 1, [{ kind: 'reasoning', text: '想想' }, { kind: 'text', text: '在做' }]),
     assistantNode('a2', 1, 2, [{ kind: 'reasoning', text: '再想想' }]),
@@ -205,29 +205,43 @@ test('统计口径：思考 / 命令 / 编辑文件 / MCP / 提问，0 值不显
     mcpNode('m1', 1, 6, 'mcp__github__create_issue', {}),
     askNode('q1', 1, 7, [{ id: 'q', question: '?' }], [{ id: 'q', selected: [] }]),
     toolNode('r1', 1, 8, 'read', { file_path: 'a.js' }, { content: 'body' }),
-    subagentCallNode('s1', 1, 9, '去查'),
+    toolNode('r2', 1, 9, 'read_image', { file_path: 'b.png' }, { content: 'img' }),
+    toolNode('r3', 1, 10, 'grep', { pattern: 'x' }, { content: 'Found 1 match' }),
+    subagentCallNode('s1', 1, 11, '去查'),
   ]
   const stats = statsOfNodes(nodes)
   assert.equal(stats.counts.thinking, 2)
   assert.equal(stats.counts.command, 2)
+  assert.equal(stats.counts.read, 2, 'read / read_image 才算「读取文件」')
   assert.equal(stats.counts.file, 1)
   assert.equal(stats.counts.mcp, 1)
   assert.equal(stats.counts.question, 1)
-  // 只读内置与子 agent 都不进这 5 项，但都在明细里。
-  assert.equal(stats.listed, 9)
-  assert.equal(describeStats(stats, t), '思考 2 · 命令 2 · 编辑文件 1 · MCP 1 · 提问 1')
+  // 检索类（grep）与子 agent 都不进这些项，但都在明细里。
+  assert.equal(stats.listed, 11)
+  // 每一项都是完整句子（用户要求「思考 x 次 执行 y 条命令 读取 w 个文件 编辑 z 个文件 这种说法」）。
   assert.equal(
-    describeStats({ counts: { thinking: 0, command: 1, file: 0, mcp: 0, question: 0 }, listed: 1 }, t),
-    '命令 1',
+    describeStats(stats, t),
+    '思考 2 次 · 执行 2 条命令 · 读取 2 个文件 · 编辑 1 个文件 · 调用 1 个 MCP 工具 · 提问 1 次',
+  )
+  assert.equal(
+    describeStats(
+      { counts: { thinking: 0, command: 1, read: 0, file: 0, mcp: 0, question: 0 }, listed: 1 },
+      t,
+    ),
+    '执行 1 条命令',
     '为 0 的类别完全不出现',
   )
   assert.equal(
-    describeStats({ counts: { thinking: 0, command: 0, file: 0, mcp: 0, question: 0 }, listed: 3 }, t),
+    describeStats(
+      { counts: { thinking: 0, command: 0, read: 0, file: 0, mcp: 0, question: 0 }, listed: 3 },
+      t,
+    ),
     '3 个操作',
   )
   assert.deepEqual(statsSummary(stats).segments.map((item) => item.category), [
     'thinking',
     'command',
+    'read',
     'file',
     'mcp',
     'question',
@@ -531,6 +545,30 @@ test('cutOffOf：超时与「结果未知」不算被打断（用户裁决），
   assert.equal(toolCardOf(unknown.data.root).status, 'cancelled')
   // 真的被用户取消/中止的仍然算被打断。
   assert.equal(cutOffOf([interruptedPwshNode('tt3', 1, 3, 'sleep 1')]), true)
+})
+
+test('cutOffOf：命令执行失败 / 结果没挂回节点，都不算被打断（用户裁决）', () => {
+  // ① 命令失败：宿主把退出码写进结果文本尾部，`isError` 仍是 false。
+  const failed = pwshNode('f1', 1, 1, 'node --test', 'AssertionError', 1)
+  assert.equal(cutOffOf([failed]), false, '命令执行失败不是「被打断」')
+  assert.equal(toolCardOf(failed.data.root).status, 'failed', '失败本身照旧显示成「运行失败」')
+
+  // ② 工具报错：`isError` + 明确的失败码（本机实测的真实形状）。
+  const errored = toolNode('f2', 1, 2, 'edit', { file_path: 'a.js' }, {
+    content: '',
+    isError: true,
+    error: { name: 'FsError', code: 'FS_NOT_OBSERVED' },
+  })
+  assert.equal(cutOffOf([errored]), false, '工具调用失败同样不是「被打断」')
+
+  // ③ 结果没挂回节点（`surfaceOp: 'replace'` 的历史重放会这样，本机实测 20 例）：
+  //    节点停在「未落定」上，但没有任何「有人掐了它」的证据。
+  const unattached = toolNode('f3', 1, 3, 'pwsh', { command: 'git status' })
+  assert.equal(cutOffOf([unattached]), false, '没落定只说明结果没挂上，不说明被掐断')
+  assert.equal(toolCardOf(unattached.data.root).status, 'running')
+
+  // ④ 唯一还算「被打断」的仍然是核心给出的中断证据。
+  assert.equal(cutOffOf([interruptedPwshNode('f4', 1, 4, 'sleep 1')]), true)
 })
 
 test('待发送 / 插队的消息：插队保留、本地回显落地后消失、排队的不进对话流', () => {

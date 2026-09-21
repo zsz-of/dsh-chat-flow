@@ -699,7 +699,7 @@ function turnGroup(overrides = {}) {
     closing: [],
     footerNodes: [],
     subagents: { notices: new Map(), consumed: new Set() },
-    stats: { counts: { thinking: 0, command: 0, file: 0, mcp: 0, question: 0 }, listed: 0 },
+    stats: { counts: { thinking: 0, command: 0, read: 0, file: 0, mcp: 0, question: 0 }, listed: 0 },
     ...overrides,
   }
 }

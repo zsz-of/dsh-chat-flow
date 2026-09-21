@@ -112,7 +112,7 @@ test('apply() 注册语言包、样式与唯一的视图条目', () => {
   assert.doesNotThrow(() => injected.loadOlder())
 })
 
-test('视图渲染：计划分组 / 任务列表 / 正在处理统计都在', () => {
+test('视图渲染：任务过程 / 任务列表 / 正在处理统计都在', () => {
   const { captured, view, t } = bootView()
 
   const nodes = [
@@ -140,13 +140,14 @@ test('视图渲染：计划分组 / 任务列表 / 正在处理统计都在', ()
   })
   const text = collectText(tree)
   assert.match(text, /把 A 和 B 都做掉/)
-  assert.match(text, /规划过程/)
+  assert.match(text, /任务过程/)
   assert.match(text, /任务列表/)
   assert.match(text, /2 项 · 2 已完成/)
   assert.match(text, /任务A/)
   assert.match(text, /任务B/)
   assert.match(text, /已完成/)
   assert.match(text, /两件事都做完了/)
+  assert.equal(/规划过程/.test(text), false, '「规划过程」折叠体已移除，其内容并进任务过程')
   assert.equal(captured.registered.length, 1)
 })
 
@@ -1170,7 +1171,7 @@ function countIn(element, predicate) {
   return preorderOf(element).filter(predicate).length
 }
 
-test('规划过程：不重复显示任务列表，也不写「N 项 · M 已完成」', () => {
+test('规划段并进任务过程：不再有独立的「规划过程」折叠体，也不重复显示任务列表', () => {
   const { view, t } = bootView()
   const tree = view.component({
     sessionId: 'session-plan-once',
@@ -1196,26 +1197,27 @@ test('规划过程：不重复显示任务列表，也不写「N 项 · M 已完
     1,
     '任务列表快照面板只应有一块',
   )
-  // 规划分组带专属类名 `dcf-planfold`，而且**与「任务过程」同级**（都在回合块下，不是嵌套在里面）。
-  const planBlock = preorderOf(tree).find((element) =>
-    String(element.props?.className ?? '').includes('dcf-planfold'),
-  )
-  assert.ok(planBlock !== undefined, '应有「规划过程」折叠分组')
+  // 「规划过程」作为**独立折叠体**已被移除（用户要求「移除掉规划过程，全部算任务过程里面」）：
+  // 回合块的直接子节点里只该有用户气泡、任务过程、任务列表快照面板、收尾控件；没有第二个折叠头。
   assert.equal(
-    countIn(planBlock, (element) => String(element.props?.className ?? '').includes('dcf-taskrow')),
+    countIn(tree, (element) => String(element.props?.className ?? '').includes('dcf-planfold')),
     0,
-    '规划过程里不该再画一份任务清单（那一份就是下面的快照面板）',
+    '不应再有独立的「规划过程」折叠体',
   )
   const turn = findElement(tree, (element) => element.props?.className === 'dcf-turn')
   const children = (Array.isArray(turn.props.children) ? turn.props.children : [turn.props.children]).filter(Boolean)
   assert.equal(
     children.some((child) => String(child.props?.className ?? '').includes('dcf-planfold')),
-    true,
-    '规划过程是回合块的直接子节点（与任务过程同级，不再被折进任务过程）',
+    false,
+    '回合块下不该再挂「规划过程」折叠体',
   )
-  const planHead = findElement(planBlock, (element) => String(element.props?.className ?? '').includes('dcf-row'))
-  assert.equal(planHead.props['aria-expanded'], false, '规划过程默认收起（规划完成后自动折叠）')
-  assert.equal(/项 ·/.test(collectText(planHead)), false, '折叠头不再显示「N 项 · M 已完成」')
+  // 规划段的内容必须**还在**，而且是折进「任务过程」那个折叠体里（不能因为删折叠体把内容丢了）。
+  const stage = findElement(turn, (element) => element.props?.className === 'dcf-block')
+  assert.ok(stage !== undefined, '应有「任务过程」折叠体')
+  const stageText = collectText(stage)
+  assert.match(stageText, /先规划一下。/, '动手之前说的那段话要落在任务过程里')
+  assert.match(stageText, /任务A/, '第一个任务列表快照也要在同一个折叠体里')
+  assert.equal(/规划过程/.test(collectText(tree)), false, '界面上不该再出现「规划过程」这个标题')
 })
 
 test('思考块被正文切成多块：正文一出现，上一块封口，下一块重新开始', () => {

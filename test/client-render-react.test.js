@@ -155,7 +155,7 @@ function render(snapshot, options = {}) {
   )
 }
 
-test('SSR：任务视图在真实 React 下渲染出计划 / 任务 / 状态', (t) => {
+test('SSR：任务视图在真实 React 下渲染出任务过程 / 任务 / 状态', (t) => {
   if (!ready) return t.skip('缺少 profile 里的 react / react-dom（先跑一次 install.mjs）')
   const html = render(
     makeSnapshot([
@@ -171,11 +171,13 @@ test('SSR：任务视图在真实 React 下渲染出计划 / 任务 / 状态', (
   assert.match(html, /data-chat-flow-owner="dsh-chat-flow"/)
   assert.match(html, /dcf-root/)
   assert.match(html, /把 A 和 B 都做掉/)
-  assert.match(html, /规划过程/)
+  assert.match(html, /任务过程/)
   assert.match(html, /任务列表/)
   assert.match(html, /任务A/)
   assert.match(html, /进行中/)
   assert.match(html, /data-status="in_progress"/)
+  // 「规划过程」作为独立折叠体已移除（用户要求「移除掉规划过程，全部算任务过程里面」）。
+  assert.equal(/规划过程/.test(html), false, '界面上不该再出现「规划过程」')
 })
 
 test('SSR：任务状态与「正在处理」统计随节点数据变化', (t) => {

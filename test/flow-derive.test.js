@@ -506,10 +506,31 @@ test('cutOffOf：被取消/中断的过程认得出，正常结束的认不出',
   interrupted.data.status = 'interrupted'
   assert.equal(cutOffOf([interrupted]), true)
   assert.equal(cutOffOf([assistantNode('a1', 1, 1, [{ kind: 'text', text: '完整' }])]), false)
-  assert.equal(cutOffOf([interruptedPwshNode('t9', 1, 4, 'sleep 1')]), true, '被取消的工具调用也算没善终')
+  assert.equal(cutOffOf([interruptedPwshNode('t9', 1, 4, 'sleep 1')]), true, '被用户取消的工具调用算被打断')
   assert.equal(cutOffOf([pwshNode('t1', 1, 2, 'echo a', 'a')]), false)
   assert.equal(cutOffOf([]), false)
   assert.equal(cutOffOf(undefined), false)
+})
+
+test('cutOffOf：超时与「结果未知」不算被打断（用户裁决），但卡片状态仍是「已取消」', () => {
+  const timedOut = toolNode('tt1', 1, 1, 'pwsh', { command: 'sleep 999' }, {
+    content: '',
+    isError: true,
+    error: { name: 'Timeout', code: 'tool_timeout' },
+  })
+  const unknown = toolNode('tt2', 1, 2, 'pwsh', { command: 'echo x' }, {
+    content: '',
+    isError: true,
+    error: { name: 'Unknown', code: 'tool_outcome_unknown' },
+  })
+  assert.equal(cutOffOf([timedOut]), false, '超时是运行环境的问题，不是「有人把它掐了」')
+  assert.equal(cutOffOf([unknown]), false, '结果未知同理')
+
+  // 卡片状态的口径不变：这两个都不是「失败」，仍然按「已取消」展示。
+  assert.equal(toolCardOf(timedOut.data.root).status, 'cancelled')
+  assert.equal(toolCardOf(unknown.data.root).status, 'cancelled')
+  // 真的被用户取消/中止的仍然算被打断。
+  assert.equal(cutOffOf([interruptedPwshNode('tt3', 1, 3, 'sleep 1')]), true)
 })
 
 test('待发送 / 插队的消息：插队保留、本地回显落地后消失、排队的不进对话流', () => {

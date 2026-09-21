@@ -423,7 +423,6 @@ test('「此刻正在做的那一项」：被后续列表更新完成或删除�
     [false, true],
     'A 已被后续更新标成完成 → 历史分段收起；B 才是当前的',
   )
-
   const allDone = deriveFlow(
     makeSnapshot([
       userNode('u1', 1, '干活'),
@@ -461,6 +460,71 @@ test('回合已结束时，未完成的任务仍被标记为 unfinished', () => 
   assert.deepEqual(group.footerNodes.map((node) => node.kind), ['turn-tail'])
   // `liveKey` 指向本回合最后一个**参与折叠**的节点（收尾节点不算）：渲染层用它判定「哪一块还在写」。
   assert.equal(group.liveKey, 't1')
+})
+
+test('「被打断」只看最后一个任务列表的状态（用户裁决）', () => {
+  // 第一版列表把任务A点成进行中；后续每一次列表都会把它冻结在「进行中」。
+  // 若拿「任一版本里有进行中」当判据，任何跑过两步以上的回合都会恒定显示「被打断」。
+  const advanced = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [
+        { content: '任务A', status: 'in_progress' },
+        { content: '任务B', status: 'pending' },
+      ]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      todoNode('p2', 1, 3, [
+        { content: '任务A', status: 'completed' },
+        { content: '任务B', status: 'completed' },
+      ]),
+      turnTailNode('tt1', 1, 4),
+    ]),
+  ).turns[0]
+  assert.equal(advanced.closed, true)
+  assert.equal(
+    advanced.segments[0].todos.some((todo) => todo.status === 'in_progress'),
+    true,
+    '第一版快照永远冻结在「进行中」（这正是误报的来源）',
+  )
+  assert.equal(advanced.unfinished, false, '最后一个列表已全部完成 → 这个回合没有被「打断」')
+
+  // 最后一个列表里仍留着进行中的那一项：这才叫没善终。
+  const stuck = deriveFlow(
+    makeSnapshot([
+      userNode('u2', 2, '干活'),
+      todoNode('q1', 2, 1, [{ content: '任务A', status: 'in_progress' }]),
+      todoNode('q2', 2, 2, [{ content: '任务A', status: 'in_progress' }]),
+      turnTailNode('tt2', 2, 3),
+    ]),
+  ).turns[0]
+  assert.equal(stuck.unfinished, true, '最后一个列表里那一项还在进行中 → 被打断')
+})
+
+test('分段被后续列表接管：superseded 标记与「已停止」的判据', () => {
+  const group = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      todoNode('p1', 1, 1, [
+        { content: '任务A', status: 'in_progress' },
+        { content: '任务B', status: 'pending' },
+      ]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+      todoNode('p2', 1, 3, [
+        { content: '任务A', status: 'completed' },
+        { content: '任务B', status: 'in_progress' },
+      ]),
+    ]),
+  ).turns[0]
+  assert.deepEqual(
+    group.segments.map((segment) => segment.superseded),
+    [true, false],
+    '后面还有更新的列表 → 旧分段被接管；最后一个不是',
+  )
+
+  const single = deriveFlow(
+    makeSnapshot([userNode('u2', 2, '干活'), todoNode('q1', 2, 1, [{ content: '任务A', status: 'in_progress' }])]),
+  ).turns[0]
+  assert.deepEqual(single.segments.map((segment) => segment.superseded), [false], '只有一版列表时它就是当前那一版')
 })
 
 test('收尾节点不进过程折叠：单独成组，插不进任何段', () => {

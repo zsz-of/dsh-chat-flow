@@ -1045,7 +1045,54 @@ test('子 agent 只回了 started 一行时，回合不算「被打断」', () =
   )
 })
 
-test('任务列表：整表都已完成的快照默认收起，未完成的仍然默认展开', () => {
+test('任务列表：只有最新一块默认展开，被接管的旧块自动折叠并显示「已停止」', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-plate-superseded',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [
+            { content: '任务A', status: 'in_progress' },
+            { content: '任务B', status: 'pending' },
+          ]),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+          todoNode('p2', 1, 3, [
+            { content: '任务A', status: 'completed' },
+            { content: '任务B', status: 'in_progress' },
+          ]),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
+  })
+  const heads = preorderOf(tree).filter((element) =>
+    String(element.props?.className ?? '').includes('dcf-platehead'),
+  )
+  assert.equal(heads.length, 2, '两块任务列表快照')
+  assert.equal(heads[0].props['aria-expanded'], false, '新列表出现后，旧列表自动折叠（用户要求）')
+  assert.equal(heads[1].props['aria-expanded'], true, '只有最新那一块默认展开')
+
+  // 旧块里的「进行中」不再显示运行态，而是「已停止」（内容冻结，运行状态跟最新列表走）。
+  const plates = preorderOf(tree).filter((element) => element.props?.className === 'dcf-plate')
+  assert.equal(plates.length, 2)
+  const rowsOf = (plate) =>
+    preorderOf(plate).filter((element) => String(element.props?.className ?? '').includes('dcf-taskrow'))
+  const oldRow = rowsOf(plates[0]).find((row) => collectText(row).includes('任务A'))
+  assert.equal(oldRow.props['data-status'], 'stopped', '被接管的旧块里那一项显示成「已停止」')
+  assert.match(collectText(oldRow), /已停止/)
+  // 最新那一块里进行中的那一项照旧是运行态。
+  const liveRow = rowsOf(plates[1]).find((row) => collectText(row).includes('任务B'))
+  assert.equal(liveRow.props['data-status'], 'in_progress')
+  assert.match(collectText(liveRow), /进行中/)
+  // 两块面板合起来：只有一个「进行中」（最新那一版里的任务B），旧块那一项已经变成「已停止」。
+  const plateRows = plates.flatMap((plate) => rowsOf(plate))
+  assert.equal(plateRows.filter((row) => row.props['data-status'] === 'in_progress').length, 1)
+  assert.equal(plateRows.filter((row) => row.props['data-status'] === 'stopped').length, 1)
+})
+
+test('任务列表：整表都已完成的「当前那一版」也默认收起', () => {
   const { view, t } = bootView()
   const tree = view.component({
     sessionId: 'session-plate-done-default',
@@ -1071,8 +1118,8 @@ test('任务列表：整表都已完成的快照默认收起，未完成的仍�
     String(element.props?.className ?? '').includes('dcf-platehead'),
   )
   assert.equal(heads.length, 2, '两块任务列表快照')
-  assert.equal(heads[0].props['aria-expanded'], true, '还没全部完成的那块默认展开')
-  assert.equal(heads[1].props['aria-expanded'], false, '「全部已完成」的那块默认收起')
+  assert.equal(heads[0].props['aria-expanded'], false, '旧块被接管 → 收起')
+  assert.equal(heads[1].props['aria-expanded'], false, '「全部已完成」的当前那一版也默认收起')
 })
 
 test('展开箭头：包裹盒与图标盒同尺寸并居中，旋转中心才是箭头中心', () => {

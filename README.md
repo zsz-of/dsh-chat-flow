@@ -107,5 +107,10 @@ localStorage 不可用时自动降级为当前页面内存。卸载用 `node scr
 
 ## 许可证
 
-GPL-3.0-or-later（GNU General Public License v3.0 or later），与 [ZLC](https://github.com/zsz-of/ZLC) 相同；
-完整正文见 [LICENSE](./LICENSE)。
+本程序基于 **GNU General Public License v3.0 (GPLv3)** 开源协议发布。
+
+Copyright (C) 2026 zsz
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+本程序分发时附带希望其有用的保证，但不提供任何担保；甚至不提供适销性或特定用途适用性的默示担保。详见 [LICENSE](LICENSE)。

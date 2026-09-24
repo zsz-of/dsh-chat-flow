@@ -188,6 +188,42 @@ function findElement(element, predicate) {
   return found
 }
 
+/** 遍历树里**每一个**满足条件的元素（`findElement` 只给第一个）。 */
+function collectElements(element, visit) {
+  const walk = (value) => {
+    if (value === null || value === undefined || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    if (value.props !== undefined) visit(value)
+    walk(value.props?.children)
+  }
+  walk(element)
+}
+
+/**
+ * 点开树里所有收起的「思考中 / 思考完成」块。
+ *
+ * 思考块是**唯一**懒加载的折叠体（`Fold` 的 `lazy`）：收起时它的正文根本不在树里。
+ * 想断言过程明细（命令卡、差异、上下文准备…）就必须先点开它——这正是用户在界面上的操作顺序。
+ * 展开一层可能露出更内层的块，所以循环几轮，直到没有可点开的折叠头。
+ *
+ * @param view - `bootView()` 拿到的视图条目。
+ * @param props - 渲染参数（带 `sessionId` / `t` / `useChat` / `useSession`）。
+ */
+function expandThinkingBlocks(view, props) {
+  for (let pass = 0; pass < 5; pass += 1) {
+    const heads = []
+    collectElements(view.component(props), (element) => {
+      const className = String(element.props?.className ?? '')
+      if (className.includes('dcf-thinkinghead') && element.props['aria-expanded'] === false) heads.push(element)
+    })
+    if (heads.length === 0) return
+    for (const head of heads) head.props.onClick()
+  }
+}
+
 test('默认展开策略：跑动中的任务过程/任务列表/任务行展开，思考块与明细收起', () => {
   const { view, t } = bootView()
   const snapshot = makeSnapshot([
@@ -195,22 +231,35 @@ test('默认展开策略：跑动中的任务过程/任务列表/任务行展开
     todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
     pwshNode('t1', 1, 2, 'live-command', 'live-output'),
   ])
-  const tree = view.component({
+  const props = {
     sessionId: 'session-live',
     t,
     useChat: (selector) => selector(snapshot),
     useSession: () => ({ hasMore: false, running: true }),
-  })
+  }
+  const tree = view.component(props)
   assert.match(collectText(tree), /任务A/)
   assert.match(collectText(tree), /进行中/)
   // 用户当轮的默认策略：**任务过程跑动中默认展开**（此时不允许关闭）；任务列表展开；
-  // 任务行展开（就是当前那一项）；思考块默认折叠（哪怕它还在写）；卡片明细收起。
+  // 任务行展开（就是当前那一项）；思考块默认折叠（哪怕它还在写）。
+  // 思考块里那张卡片明细这一版**还不在树里**——思考块是唯一懒加载的折叠体，
+  // 收起时它的正文不渲染（用户要求「折叠的内容不要加载」），所以这里只有 4 个折叠容器。
   assert.deepEqual(
     foldStates(tree),
-    ['true', 'true', 'true', 'false', 'false'],
-    '任务过程展开（跑动中）、任务列表展开、任务行展开、思考块收起、卡片明细收起',
+    ['true', 'true', 'true', 'false'],
+    '任务过程展开（跑动中）、任务列表展开、任务行展开、思考块收起（正文懒加载，未进树）',
   )
-  assert.match(collectText(tree), /live-command/)
+  assert.equal(collectText(tree).includes('live-command'), false, '收起的思考块不渲染正文（命令明细不在 DOM 里）')
+
+  // 点开思考块 → 正文才挂上，且里面那张卡片明细仍然是收起的。
+  expandThinkingBlocks(view, props)
+  const opened = view.component(props)
+  assert.match(collectText(opened), /live-command/, '展开思考块后正文按需重建')
+  assert.deepEqual(
+    foldStates(opened),
+    ['true', 'true', 'true', 'true', 'false'],
+    '展开思考块后第 5 个折叠容器（卡片明细）才出现，且保持收起',
+  )
 })
 
 test('手动展开会被记住：覆盖默认展开策略', () => {
@@ -228,7 +277,11 @@ test('手动展开会被记住：覆盖默认展开策略', () => {
     useSession: () => ({ hasMore: false, running: true }),
   }
   const before = view.component(props)
-  assert.deepEqual(foldStates(before), ['true', 'true', 'true', 'false', 'false'], '任务过程跑动中展开；任务列表、任务行展开；思考块收起')
+  assert.deepEqual(
+    foldStates(before),
+    ['true', 'true', 'true', 'false'],
+    '任务过程跑动中展开；任务列表、任务行展开；思考块收起（正文懒加载，未进树）',
+  )
 
   // 点「思考中」那一行 → 展开它（默认是收起的）。「任务过程」此刻点不动，所以只能点思考块。
   const procRow = findElement(
@@ -386,7 +439,7 @@ test('原生座位：每个节点都经 conversation.chat.node 交给核心渲�
     tool,
   ])
   const openFile = () => Promise.resolve()
-  const tree = view.component({
+  const props = {
     sessionId: 'session-seat',
     t,
     useChat: (selector) => selector(snapshot),
@@ -394,7 +447,12 @@ test('原生座位：每个节点都经 conversation.chat.node 交给核心渲�
     renderSlot,
     openFile,
     openView: (id) => id,
-  })
+  }
+  // 思考块收起时正文不渲染（懒加载），所以工具调用那一行本来就不在树里——先点开它。
+  // 点开这一动作本身会走一遍渲染，会往 `calls` 里塞座位调用；清空后再渲染最后一棵树。
+  expandThinkingBlocks(view, props)
+  calls.length = 0
+  const tree = view.component(props)
 
   assert.ok(calls.length >= 2, '用户发言与工具调用都应经过原生座位')
   for (const call of calls) {
@@ -428,33 +486,35 @@ test('原生座位：cwd 来自 useSessions；装配里没有 renderSlot 时退�
   const { view, t } = bootView()
   const snapshot = makeSnapshot([userNode('u1', 1, '干活'), pwshNode('t1', 1, 1, 'echo a', 'a')])
   const { calls, renderSlot } = seatSpy()
-  view.component({
-    sessionId: 'session-seat-cwd',
+  // 工具行在思考块正文里（懒加载），三次渲染都要先点开思考块，那一行才会进树。
+  const build = (overrides) => ({
     t,
     useChat: (selector) => selector(snapshot),
     useSession: () => ({ hasMore: false, loadingOlder: false }),
-    renderSlot,
+    ...overrides,
   })
+
+  const first = build({ sessionId: 'session-seat-cwd', renderSlot })
+  expandThinkingBlocks(view, first)
+  calls.length = 0
+  view.component(first)
   assert.equal(calls[0].owner.cwd, undefined)
 
   calls.length = 0
-  view.component({
+  const second = build({
     sessionId: 'session-seat-cwd-2',
-    t,
-    useChat: (selector) => selector(snapshot),
-    useSession: () => ({ hasMore: false, loadingOlder: false }),
     renderSlot,
     useSessions: (selector) => selector({ byId: { 'session-seat-cwd-2': { cwd: 'D:/work' } } }),
   })
+  expandThinkingBlocks(view, second)
+  calls.length = 0
+  view.component(second)
   assert.equal(calls[0].owner.cwd, 'D:/work')
 
   // 没有 renderSlot（ui-chat 不在装配里）→ 一次座位都不调，直接画自绘卡片。
-  const plain = view.component({
-    sessionId: 'session-no-slot',
-    t,
-    useChat: (selector) => selector(snapshot),
-    useSession: () => ({ hasMore: false, loadingOlder: false }),
-  })
+  const third = build({ sessionId: 'session-no-slot' })
+  expandThinkingBlocks(view, third)
+  const plain = view.component(third)
   assert.notEqual(findElement(plain, (element) => element.props?.className === 'dcf-card'), null)
   assert.equal(
     calls.some((call) => call.owner.node.kind === 'tool-call'),
@@ -774,11 +834,11 @@ test('插队 / 排队的消息在列表末尾有座位，并标出各自状态',
   assert.match(collectText(deduped), /插一句话/, '插队项仍在队列里，照常显示')
 })
 
-test('取消键留下的半截过程：标成「被打断」，内容仍在（挂载不卸载）', () => {
+test('取消键留下的半截过程：标成「被打断」，点开才加载那半截内容', () => {
   const { view, t } = bootView()
   const half = assistantNode('a1', 1, 2, [{ kind: 'reasoning', text: '写到一半就停了' }])
   half.data.status = 'interrupted'
-  const tree = view.component({
+  const props = {
     sessionId: 'session-cut-off',
     t,
     useChat: (selector) =>
@@ -791,17 +851,25 @@ test('取消键留下的半截过程：标成「被打断」，内容仍在（�
         ]),
       ),
     useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
-  })
+  }
+  const tree = view.component(props)
   const text = collectText(tree)
   assert.match(text, /被打断/, '半截的过程要写「被打断」（用户要求用这个词，不要「未完成」）')
   assert.equal(text.includes('未完成'), false, '不再出现「未完成」字样')
-  assert.match(text, /写到一半就停了/, '内容必须还在（折叠体保持挂载，只是收起）')
+  assert.equal(text.includes('写到一半就停了'), false, '收起即不渲染：懒加载的正文不在 DOM 里')
   const head = findElement(
     tree,
     (element) =>
       String(element.props?.className ?? '').includes('dcf-thinkinghead') && collectText(element).includes('被打断'),
   )
   assert.equal(head.props['aria-expanded'], false, '思考块一律默认收起（用户要求），点开即可看到半截内容')
+
+  expandThinkingBlocks(view, props)
+  assert.match(
+    collectText(view.component(props)),
+    /写到一半就停了/,
+    '点开折叠头后那半截内容按需加载出来（内容本身没丢，只是收起时不渲染）',
+  )
 })
 
 test('视图层错误边界：本插件自己的渲染错误降级成错误摘要，而非让整块视图让位', async () => {
@@ -1126,7 +1194,7 @@ test('任务列表：整表都已完成的「当前那一版」也默认收起',
 
 test('对话最前端不出现「无操作」的残留思考块', () => {
   const { view, t } = bootView()
-  const tree = view.component({
+  const props = {
     sessionId: 'session-blank-run',
     t,
     useChat: (selector) =>
@@ -1140,7 +1208,8 @@ test('对话最前端不出现「无操作」的残留思考块', () => {
         ]),
       ),
     useSession: () => ({ hasMore: false, loadingOlder: false, running: true }),
-  })
+  }
+  const tree = view.component(props)
   const text = collectText(tree)
   assert.equal(/无操作/.test(text), false, '不该出现「无操作」的思考块')
   assert.equal(
@@ -1153,14 +1222,16 @@ test('对话最前端不出现「无操作」的残留思考块', () => {
     1,
     '只有真正有内容的思考块才画',
   )
-  assert.match(text, /真的在想/)
+  // 懒加载：正文在收起态不进树，点开后才看得到那一条推理。
+  expandThinkingBlocks(view, props)
+  assert.match(collectText(view.component(props)), /真的在想/)
 })
 
 test('整块渲染成空的过程不画思考块（夹在正文之间的空白步）', () => {
   const { view, t } = bootView()
   // 空白步（没有正文也没有推理）被两段正文夹住 → 它**独占一个过程 run**，
   // 画出来就是一个「无操作」的空思考块（用户报告过最前面那块残留）。
-  const tree = view.component({
+  const props = {
     sessionId: 'session-blank-run-alone',
     t,
     useChat: (selector) =>
@@ -1175,7 +1246,8 @@ test('整块渲染成空的过程不画思考块（夹在正文之间的空白�
         ]),
       ),
     useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
-  })
+  }
+  const tree = view.component(props)
   const text = collectText(tree)
   assert.equal(/无操作/.test(text), false, '空白的过程不画折叠头，也就不会出现「无操作」')
   assert.equal(
@@ -1183,7 +1255,9 @@ test('整块渲染成空的过程不画思考块（夹在正文之间的空白�
     1,
     '只画真正有内容的那个思考块',
   )
-  assert.match(text, /真的在想/)
+  // 懒加载：那一块是「真正有内容」的那个，点开才看得到它的正文。
+  expandThinkingBlocks(view, props)
+  assert.match(collectText(view.component(props)), /真的在想/)
 })
 
 test('展开箭头：包裹盒与图标盒同尺寸并居中，旋转中心才是箭头中心', () => {
@@ -1367,7 +1441,7 @@ test('思考块被正文切成多块：正文一出现，上一块封口，下�
 
 test('系统提示词并入「上下文准备」，只成一个折叠点', () => {
   const { view, t } = bootView()
-  const tree = view.component({
+  const props = {
     sessionId: 'session-context-merge',
     t,
     useChat: (selector) =>
@@ -1379,7 +1453,10 @@ test('系统提示词并入「上下文准备」，只成一个折叠点', () =>
         ]),
       ),
     useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
-  })
+  }
+  // 上下文注入与系统提示词都是过程节点，装在懒加载的思考块正文里——先点开它。
+  expandThinkingBlocks(view, props)
+  const tree = view.component(props)
 
   const contextFolds = preorderOf(tree).filter((element) =>
     String(element.props?.className ?? '').includes('dcf-row'),
@@ -1468,3 +1545,207 @@ function text2Blocks(tree) {
   )
   return /思考已完成/.test(collectText(heads[0])) && /思考中/.test(collectText(heads[heads.length - 1]))
 }
+
+/* ─────────────────── 回滚隐藏节点 / 懒加载边界 / 回到底部 / 删除清理 ─────────────────── */
+
+test('被标记为隐藏的节点（回滚掉的旧版本）不出现在任务视图里', () => {
+  const { orderedNodes } = client.__internals
+  const node = (key) => ({ key, kind: 'user-input', visibility: 'visible', data: {} })
+  const hidden = (key) => ({ key, kind: 'assistant-step', visibility: 'hidden', data: {} })
+  const snapshot = {
+    order: ['u1', 'h1', 'a1'],
+    nodes: new Map([
+      ['u1', node('u1')],
+      ['h1', hidden('h1')],
+      ['a1', node('a1')],
+    ]),
+  }
+  assert.deepEqual(
+    orderedNodes(snapshot).map((item) => item.key),
+    ['u1', 'a1'],
+    'order 里还留着的旧节点，只要 visibility=hidden 就不显示',
+  )
+  // order 拿不到东西时才退化成「取 Map 全部值」——降级路径同样要过滤隐藏节点。
+  assert.deepEqual(
+    orderedNodes({ order: [], nodes: new Map([['h1', hidden('h1')]]) }),
+    [],
+    '降级路径也要过滤隐藏节点',
+  )
+  assert.deepEqual(
+    orderedNodes({ order: null, nodes: new Map([['u1', node('u1')], ['h1', hidden('h1')]]) }).map((i) => i.key),
+    ['u1'],
+    '降级路径留下可见节点',
+  )
+  assert.deepEqual(orderedNodes(undefined), [], '没有快照时给空数组')
+})
+
+test('懒加载只给思考块：其它折叠体收起时子树照旧挂载', () => {
+  const { view, t } = bootView()
+  const props = {
+    sessionId: 'session-lazy-scope',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'in_progress' }]),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  }
+  const tree = view.component(props)
+
+  // 最外层「任务过程」默认收起（任务已结束），但里面的任务列表子树仍在树里——
+  // 折叠动画、嵌套展开状态都依赖「只隐藏不卸载」这条契约，只有思考块例外。
+  const stageFold = preorderOf(tree).find(
+    (element) => String(element.props?.className ?? '').includes('dcf-fold') && collectText(element).includes('任务列表'),
+  )
+  assert.ok(stageFold !== undefined, '「任务过程」收起时，它里面的任务列表子树仍应挂载')
+  assert.equal(stageFold.props['data-open'], 'false', '而它确实是收起的（只改 CSS 轨道高度）')
+
+  // 思考块是唯一懒加载的折叠体：收起时正文（原生座位、命令卡）根本不在树里。
+  const thinking = findElement(tree, (element) => String(element.props?.className ?? '').includes('dcf-thinking'))
+  assert.ok(thinking !== undefined, '应有思考块')
+  const thinkingBody = findElement(thinking, (element) => element.props?.className === 'dcf-body')
+  assert.equal(thinkingBody.props.children, null, '思考块收起时正文不渲染（唯一传 lazy 的折叠体）')
+  assert.equal(collectText(thinking).includes('echo a'), false, '收起态看不到命令明细')
+
+  // 点开之后正文才进树。
+  expandThinkingBlocks(view, props)
+  const opened = findElement(view.component(props), (element) => String(element.props?.className ?? '').includes('dcf-thinking'))
+  const openedBody = findElement(opened, (element) => element.props?.className === 'dcf-body')
+  assert.notEqual(openedBody.props.children, null, '展开后正文按需加载出来')
+})
+
+test('导轨加载时默认落在最后一轮（不给初始值时留给 measure 决定）', () => {
+  const { useScroller } = client.__internals
+  const rootRef = { current: null }
+  assert.equal(
+    useScroller(rootRef, { turns: [1, 2] }).activeTurn,
+    null,
+    '不给 initialActiveTurn 时先不选中，等 measure() 按视口判定',
+  )
+  assert.equal(
+    useScroller(rootRef, { turns: [1, 2], initialActiveTurn: 2 }).activeTurn,
+    2,
+    '给了初始值就直接落在最后一轮，不再把最上面那轮误判成 active',
+  )
+})
+
+test('导轨默认高亮最后一个回合（视图侧接线）', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-rail-default',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '第一件事'),
+          pwshNode('t1', 1, 2, 'echo a', 'a'),
+          turnTailNode('tt1', 1, 3),
+          userNode('u2', 2, '第二件事'),
+          pwshNode('t2', 2, 2, 'echo b', 'b'),
+          turnTailNode('tt2', 2, 3),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+
+  const marks = preorderOf(tree).filter((element) => String(element.props?.className ?? '').includes('dcf-mark'))
+  assert.equal(marks.length, 2, '两个回合两个刻度')
+  const active = marks.filter((element) => element.props['data-active'] === 'true')
+  assert.equal(active.length, 1, '同时只有一个刻度是 active')
+  assert.equal(active[0].props['aria-label'], '跳到第 2 轮', '默认落在最后一轮，而不是第一轮')
+  assert.equal(active[0].props['aria-current'], 'true', '无障碍上也标出当前回合')
+})
+
+test('快速回到底部：判据、滚动动作、样式与文案都在位', () => {
+  const { isAwayFromBottom, scrollViewToBottom, BOTTOM_THRESHOLD_PX, FLOW_CSS, ZH, EN } = client.__internals
+  assert.equal(BOTTOM_THRESHOLD_PX, 300)
+  const scroller = (scrollTop) => ({ scrollTop, scrollHeight: 1000, clientHeight: 400 })
+
+  assert.equal(isAwayFromBottom(scroller(0)), true, '看得见顶部 → 离底部很远，按钮该出现')
+  assert.equal(isAwayFromBottom(scroller(299)), true, '离底部 301px，还没进阈值')
+  assert.equal(isAwayFromBottom(scroller(300)), false, '正好差 300px：够近，按钮不出现')
+  assert.equal(isAwayFromBottom(scroller(600)), false, '已经在底部')
+  assert.equal(isAwayFromBottom(null), false, '滚动宿主还没绑上时不显示按钮')
+  assert.equal(isAwayFromBottom(undefined), false, '拿不到滚动宿主也不炸')
+
+  const calls = []
+  scrollViewToBottom({ scrollHeight: 1234, scrollTo: (options) => calls.push(options) })
+  assert.deepEqual(calls, [{ top: 1234, behavior: 'smooth' }], '点击后直接滚到最底')
+  assert.doesNotThrow(() => scrollViewToBottom(null), '没有滚动宿主时静默跳过')
+
+  assert.match(FLOW_CSS, /\.dcf-scroll-bottom-btn\{[^}]*position:fixed[^}]*bottom:56px[^}]*right:28px/)
+  assert.match(FLOW_CSS, /\.dcf-scroll-bottom-btn\{[^}]*border-radius:50%/, '圆形浮动按钮')
+  assert.equal(ZH['flow.scrollToBottom'], '快速回到底部')
+  assert.equal(EN['flow.scrollToBottom'], 'Scroll to bottom')
+})
+
+test('删除会话时清掉本插件留下的全部会话级数据（且不误伤前缀相同的会话）', () => {
+  const { purgeSessionData, SESSION_KEY_PREFIXES } = client.__internals
+  assert.deepEqual(SESSION_KEY_PREFIXES, [
+    'dsh-chat-flow.collapse',
+    'dsh-chat-flow.scroll',
+    'dsh-chat-flow.ended-away',
+  ])
+
+  const local = createStorage()
+  const session = createStorage()
+  local.setItem('dsh-chat-flow.collapse.s1', '{"a":true}')
+  local.setItem('dsh-chat-flow.collapse.s2', '{}')
+  local.setItem('别的插件.key', 'x')
+  session.setItem('dsh-chat-flow.scroll.s1', '120')
+  session.setItem('dsh-chat-flow.ended-away.s1', '1')
+  session.setItem('dsh-chat-flow.scroll.s2', '40')
+
+  assert.equal(purgeSessionData('s1', { localStorage: local, sessionStorage: session }), 3, '删掉 3 个键')
+  assert.deepEqual([...local.raw.keys()].sort(), ['dsh-chat-flow.collapse.s2', '别的插件.key'])
+  assert.deepEqual([...session.raw.keys()], ['dsh-chat-flow.scroll.s2'])
+
+  // 键名是**精确相等**匹配，不是前缀匹配：会话 id 之间有前缀关系（s / s1 / s2），
+  // 按前缀删会把别人的数据一起删掉。
+  assert.equal(purgeSessionData('s', { localStorage: local, sessionStorage: session }), 0, '不误伤 s2')
+  assert.deepEqual([...local.raw.keys()].sort(), ['dsh-chat-flow.collapse.s2', '别的插件.key'])
+
+  // 存储不可用时静默降级：不能因为隐私模式或配额满就把「删会话」这条链路带崩。
+  const broken = {
+    length: 1,
+    key() {
+      throw new Error('storage disabled')
+    },
+    removeItem() {
+      throw new Error('storage disabled')
+    },
+  }
+  assert.equal(purgeSessionData('s1', { localStorage: broken, sessionStorage: broken }), 0, '存储抛错时返回 0')
+  assert.doesNotThrow(() => purgeSessionData('s1', { localStorage: null, sessionStorage: undefined }))
+  assert.equal(purgeSessionData('', { localStorage: local }), 0, '空 sessionId 不动手')
+  assert.equal(purgeSessionData(undefined, { localStorage: local }), 0, '没有 sessionId 不动手')
+})
+
+test('会话被删掉之后，它留下的键才被清掉（会话列表就是唯一信号）', () => {
+  const { staleSessionIds, purgeSessionData } = client.__internals
+  const local = createStorage()
+  const session = createStorage()
+  local.setItem('dsh-chat-flow.collapse.s1', '{}')
+  local.setItem('dsh-chat-flow.collapse.s19', '{}')
+  session.setItem('dsh-chat-flow.scroll.s1', '10')
+  session.setItem('别的插件.key', 'x')
+  const env = { localStorage: local, sessionStorage: session }
+
+  // 两个会话都还活着：什么都不该清（s1 与 s19 有前缀关系，不能互相误伤）。
+  assert.deepEqual(staleSessionIds(env, new Set(['s1', 's19'])), [])
+  // s1 被删了（列表里只剩 s19）：只找出 s1，且只报一次（两个存储里都有它的键）。
+  assert.deepEqual(staleSessionIds(env, new Set(['s19'])), ['s1'])
+  for (const stale of staleSessionIds(env, new Set(['s19']))) purgeSessionData(stale, env)
+  assert.deepEqual([...local.raw.keys()], ['dsh-chat-flow.collapse.s19'], 's19 的数据要留着')
+  assert.deepEqual([...session.raw.keys()], ['别的插件.key'], '别的插件的键不碰')
+
+  // 列表为空 = 重连重拉造成的短暂空表，不是「全都被删了」：一律不动手。
+  assert.deepEqual(staleSessionIds(env, new Set()), [])
+  assert.deepEqual(staleSessionIds(env, undefined), [])
+  // 存储不可用时不抛错，只是这一轮清不了。
+  assert.deepEqual(staleSessionIds({ localStorage: { length: 1, key: () => { throw new Error('x') } } }, new Set(['a'])), [])
+})

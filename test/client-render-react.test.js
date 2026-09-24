@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { before, test } from 'node:test'
 
-import { createStorage, loadBundle } from './helpers/load-bundle.mjs'
+import { loadBundle } from './helpers/load-bundle.mjs'
 
 /**
  * 让 Node 能导入 primitives 的真实 ESM 产物：它内部 `import ... from './X.module.css'`，
@@ -65,6 +65,8 @@ let renderToString
 let ReactRef
 let internals
 let ready = false
+/** 装载 `internals` 那份 bundle 时用的假存储：预置折叠状态要写进**同一份**。 */
+let ssrStorage
 /** 真实 primitives 的装载结果：只有它能验证「展开态真的能渲染」。 */
 let realInternals
 let realReady = false
@@ -98,6 +100,7 @@ before(async () => {
     )
     const loaded = await loadBundle({ react: React, primitives })
     internals = loaded.exports.__internals
+    ssrStorage = loaded.storage
     ready = true
 
     /**
@@ -134,13 +137,14 @@ before(async () => {
  * @param options - `sessionId`、`session`（`useSession` 的返回值）、`outline`、`renderSlot`、`useSessions`。
  */
 function render(snapshot, options = {}) {
+  const local = options.local ?? internals
   const t = (key, params) => {
-    const template = internals.ZH[key] ?? key
+    const template = local.ZH[key] ?? key
     if (!params) return template
     return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
   }
   return renderToString(
-    internals.views.TaskFlowView({
+    local.views.TaskFlowView({
       sessionId: options.sessionId ?? `ssr-${ssrCounter += 1}`,
       t,
       useChat: (selector) => selector(snapshot),
@@ -153,6 +157,36 @@ function render(snapshot, options = {}) {
       openView: options.openView,
     }),
   )
+}
+
+/** React 在属性值里转义过的字符还原回来（折叠键里有 `:`，正常；这里只防 `&` 之类的意外）。 */
+function unescapeAttribute(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
+/**
+ * 点开所有思考块之后的那棵树（懒加载：思考块收起时正文**根本不在 DOM 里**）。
+ *
+ * 为什么要渲染两次：折叠键只有渲染出来才知道（思考块折叠头上的 `data-fold-key`），
+ * 而折叠状态在某个会话**第一次**被读到时就缓存进内存（见 `30-collapse.js` 的 `collapseStore`），
+ * 事后再写存储已经晚了。所以先用一个探针会话渲染一次取出键，把键写成「展开」存进存储，
+ * 再用**新的会话 id** 正式渲染——键里不含会话 id，跨会话通用。
+ *
+ * @param renderOnce - `(sessionId) => html`：用给定会话 id 渲染一次。
+ * @param storage - 装载这份 bundle 时用的假存储（折叠状态就写它）。
+ */
+function withThinkingOpen(renderOnce, storage = ssrStorage) {
+  const probe = renderOnce(`ssr-probe-${(ssrCounter += 1)}`)
+  const sessionId = `ssr-open-${(ssrCounter += 1)}`
+  const state = {}
+  for (const match of probe.matchAll(/data-fold-key="([^"]+)"/g)) state[unescapeAttribute(match[1])] = true
+  storage.setItem(`dsh-chat-flow.collapse.${sessionId}`, JSON.stringify(state))
+  return renderOnce(sessionId)
 }
 
 test('SSR：任务视图在真实 React 下渲染出任务过程 / 任务 / 状态', (t) => {
@@ -182,32 +216,35 @@ test('SSR：任务视图在真实 React 下渲染出任务过程 / 任务 / 状�
 
 test('SSR：任务状态与「正在处理」统计随节点数据变化', (t) => {
   if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
-  const html = render(
-    makeSnapshot([
-      userNode('u1', 1, '干活'),
-      todoNode('p1', 1, 1, [
-        { content: '任务A', status: 'in_progress' },
-        { content: '任务B', status: 'pending' },
-      ]),
-      pwshNode('t1', 1, 2, 'echo a', 'a'),
-      writeNode('t2', 1, 3, 'a.js'),
-      toolNode('t3', 1, 4, 'mcp__github__create_issue', { title: 'x' }, { content: 'ok' }),
-      todoNode('p2', 1, 5, [
-        { content: '任务A', status: 'completed' },
-        { content: '任务B', status: 'completed' },
-      ]),
+  const snapshot = makeSnapshot([
+    userNode('u1', 1, '干活'),
+    todoNode('p1', 1, 1, [
+      { content: '任务A', status: 'in_progress' },
+      { content: '任务B', status: 'pending' },
     ]),
-  )
+    pwshNode('t1', 1, 2, 'echo a', 'a'),
+    writeNode('t2', 1, 3, 'a.js'),
+    toolNode('t3', 1, 4, 'mcp__github__create_issue', { title: 'x' }, { content: 'ok' }),
+    todoNode('p2', 1, 5, [
+      { content: '任务A', status: 'completed' },
+      { content: '任务B', status: 'completed' },
+    ]),
+  ])
+  const html = render(snapshot)
   assert.match(html, /data-status="completed"/)
   assert.match(html, /2 项 · 2 已完成/)
   // 第一个分段（任务A）的明细条数 = pwsh + write + mcp = 3。
   assert.match(html, /3 个操作/)
   // 任务已完成 → 行与「正在处理」都**默认自动折叠**。
   assert.match(html, /<div class="dcf-fold" data-open="false">/)
-  // 明细内容仍挂在 DOM 里（这是折叠动画与嵌套展开状态得以保留的前提），
-  // 但 CSS 用 `grid-template-rows:0fr` + `visibility:hidden` 让它不可见也不可聚焦
-  // （真实可见性由 client-bundle.test.js 的样式契约测试保证）。
-  assert.match(html, /echo a/)
+  // 思考块是**唯一**懒加载的折叠体：收起时明细根本不在 DOM 里（不是靠 CSS 藏起来）。
+  assert.equal(html.includes('echo a'), false, '收起即不渲染：思考块正文不在 DOM 里')
+  // 点开折叠头之后才有明细——这正是用户点开时看到的东西。
+  assert.match(
+    withThinkingOpen((sessionId) => render(snapshot, { sessionId })),
+    /echo a/,
+    '展开态那三条明细按需加载出来',
+  )
 })
 
 test('SSR：任务列表默认展开；任务过程与思考块默认收起', (t) => {
@@ -326,19 +363,11 @@ test('SSR：空会话给出空态而不是空白', (t) => {
 
 test('SSR：展开态用真实 primitives 渲染出工具明细（不崩、看到命令与结果）', async (t) => {
   if (!realReady) return t.skip('缺少 profile 里的 @deepseek-ai/dsh-client-ui-primitives')
-  const sessionId = 'ssr-expanded'
-  // 预置折叠状态：把任务行、它的「正在处理」块、以及那条命令明细全部打开。
-  const storage = createStorage()
-  storage.setItem(
-    `dsh-chat-flow.collapse.${sessionId}`,
-    JSON.stringify({ 'task:1:0': true, 'proc:1:0': true, 'op:t1': true }),
-  )
   const loaded = await loadBundle({
     react: createRequire(`${profileNodeModules().replace(/[\\/]+$/, '')}/`)('react'),
     primitives: await import(
       pathToFileURL(join(profileNodeModules(), '@deepseek-ai', 'dsh-client-ui-primitives', 'lib', 'index.js')).href
     ),
-    storage,
   })
   const local = loaded.exports.__internals
   const snapshot = makeSnapshot([
@@ -346,18 +375,10 @@ test('SSR：展开态用真实 primitives 渲染出工具明细（不崩、看�
     todoNode('p1', 1, 1, [{ content: '跑测试', status: 'in_progress' }]),
     pwshNode('t1', 1, 2, 'node --test', 'ok 30 - all green'),
   ])
-  const translate = (key, params) => {
-    const template = local.ZH[key] ?? key
-    if (!params) return template
-    return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match))
-  }
-  const html = renderToString(
-    local.views.TaskFlowView({
-      sessionId,
-      t: translate,
-      useChat: (selector) => selector(snapshot),
-      useSession: () => ({ hasMore: false }),
-    }),
+  // 展开态才算「看得到明细」：思考块懒加载，收起时那三条命令明细根本不在树里。
+  const html = withThinkingOpen(
+    (sessionId) => render(snapshot, { sessionId, local }),
+    loaded.storage,
   )
   assert.match(html, /data-terminal/, '命令明细应该由真实的 TerminalBlock 渲染')
   assert.match(html, /node --test/)
@@ -389,25 +410,25 @@ test('SSR：turnOutline 里的未加载回合也画刻度，并标出「加载�
 test('SSR：原生座位在真实 React 下渲染，展开态与锚点属性都在', (t) => {
   if (!ready) return t.skip('缺少 profile 里的 react / react-dom')
   const seen = []
-  const html = render(
-    makeSnapshot([
-      userNode('u1', 1, '跑测试'),
-      todoNode('p1', 1, 1, [{ content: '跑测试', status: 'in_progress' }]),
-      pwshNode('t1', 1, 2, 'node --test', 'ok'),
-    ]),
-    {
-      session: { running: true },
-      renderSlot: (slot, owner, options) => {
-        seen.push({ slot, kind: owner.node.kind, entryKey: options.entryKey })
-        // 替身座位：只证明「这一行交给了插槽」，并渲染出可断言的内容。
-        return ReactRef.createElement(
-          'div',
-          { 'data-native-seat': options.entryKey },
-          ReactRef.createElement('span', null, `native:${owner.node.kind}`),
-        )
-      },
+  const snapshot = makeSnapshot([
+    userNode('u1', 1, '跑测试'),
+    todoNode('p1', 1, 1, [{ content: '跑测试', status: 'in_progress' }]),
+    pwshNode('t1', 1, 2, 'node --test', 'ok'),
+  ])
+  const options = {
+    session: { running: true },
+    renderSlot: (slot, owner, seatOptions) => {
+      seen.push({ slot, kind: owner.node.kind, entryKey: seatOptions.entryKey })
+      // 替身座位：只证明「这一行交给了插槽」，并渲染出可断言的内容。
+      return ReactRef.createElement(
+        'div',
+        { 'data-native-seat': seatOptions.entryKey },
+        ReactRef.createElement('span', null, `native:${owner.node.kind}`),
+      )
     },
-  )
+  }
+  // 工具行在懒加载的思考块正文里：收起态它不进树，自然也没有座位调用。
+  const html = withThinkingOpen((sessionId) => render(snapshot, { ...options, sessionId }))
 
   assert.equal(seen.length > 0, true, '至少有一次座位调用')
   assert.equal(seen.every((call) => call.entryKey === call.kind), true, 'entryKey 必须等于节点 kind')

@@ -37,6 +37,19 @@ export function createStorage({ fail = false } = {}) {
     removeItem(key) {
       map.delete(key)
     },
+    /**
+     * 标准 Storage 的枚举接口。
+     *
+     * 生产代码按标准接口遍历（`length` + `key(i)`）而不是 `Object.keys`：
+     * 真实 `localStorage` 的键并不是自有可枚举属性，`Object.keys` 在浏览器里不可靠。
+     */
+    get length() {
+      return map.size
+    },
+    key(index) {
+      if (fail) throw new Error('storage disabled')
+      return [...map.keys()][index] ?? null
+    },
     /** 测试读取用。 */
     raw: map,
   }

@@ -107,4 +107,5 @@ localStorage 不可用时自动降级为当前页面内存。卸载用 `node scr
 
 ## 许可证
 
-MIT
+GPL-3.0-or-later（GNU General Public License v3.0 or later），与 [ZLC](https://github.com/zsz-of/ZLC) 相同；
+完整正文见 [LICENSE](./LICENSE)。

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "把「计划 → 任务列表 → 子对话折叠 + 活动折叠统计」的对话体验（TRAE / Cline 风格）带给 DSH：任务主视图 + 「对用户输出」协议（DSH 双面孔包插件）",
-  "license": "MIT",
+  "license": "GPL-3.0-or-later",
   "type": "module",
   "engines": {
     "node": ">=20"

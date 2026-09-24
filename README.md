@@ -1,35 +1,65 @@
-# dsh-chat-flow
+# DSH Chat Flow
 
-把 TRAE / Cline 那种**「计划 → 任务列表 → 子对话折叠 + 活动折叠统计」**的对话体验带进 DSH。
+> 把 TRAE / Cline 那种**「计划 → 任务列表 → 子对话折叠 + 活动折叠统计」**的对话体验带进 DSH：
+> 一个与原生「对话」并列的「任务」主视图 + 一段写进系统提示的「对用户输出」协议（DSH 双面孔包插件）。
 
-- **任务主视图**：与原生「对话」并列的独立视图（标签「任务」），把扁平的对话重组成
-  「回合 → 任务阶段 → 任务列表快照 → 子任务 → 处理过程」。
-  任务状态实时跟随模型的 `todo_write`，每完成一项界面就更新一次。
-- **叶子是核心的**：每一行节点（命令卡、文件差异、读取/搜索、提问卡、思考行…）都经插槽
-  `conversation.chat.node` 交给核心的原生条目渲染，本插件只决定它属于哪个层级；
-  原生条目缺席或渲染失败时退化成自绘卡片（每个座位外面有本插件的错误边界）。
-- **「思考中 / 思考完成」折叠统计**：一段处理过程被折进一块，折叠时只显示统计
-  （思考 / 命令 / 编辑文件 / MCP / 提问 各多少次，0 值不显示），展开才逐条看那一行行的原生明细。
-- **「对用户输出」协议**：模型只在四个时机对用户说话——任务开始、输出任务计划、需要审批、任务结束；
-  其余动作一律不产生正文，而是进入「思考中 / 思考完成」块。
-- **先规划后执行**：多步任务在动手前先写任务列表；只值一步的琐事不会被强制写计划。
+**开发者**：zsz · AI 结对：GLM（DeepSeek Harness）
+**版本**：v0.1.0
 
-## 安装
+## 系统要求
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | Windows 10 / 11（64 位） |
+| 宿主 | [DSH Desktop](https://www.deepseek.com)（插件体系按 0.1.2-rc.1 核实） |
+| 开发环境 | Node.js ≥ 20（仅安装与开发时需要） |
+
+## 下载安装
+
+本插件不发布安装包，安装即「从源码装进本机的 DSH」：
+
+1. 克隆本仓库；
+2. 在仓库目录执行 `node scripts/install.mjs`；
+3. 重启 DSH Desktop，标签栏出现「任务」视图。
 
 ```powershell
-cd Source
+git clone <本仓库地址>
+cd dsh-chat-flow
 node scripts/install.mjs            # 构建客户端 + 安装进 web profile + 组合校验
-# 然后重启 DSH Desktop（host 只在启动时组合 profile，客户端 bundle 的 URL 带内容哈希）
+node scripts/install.mjs --dry-run  # 只打印将要做什么
+node scripts/install.mjs --revert   # 卸载
 ```
 
-脚本做三件事：把 `Source/` 以 junction 链接进 `<harness>/profiles/web/node_modules/dsh-chat-flow`、
+脚本做三件事：把仓库目录以 junction 链接进 `<harness>/profiles/web/node_modules/dsh-chat-flow`、
 在 profile 的 `package.json` 里加入依赖与 `dsh.profile.bundles` 条目、最后跑
 `dsh --profile web --dump-config` 断言插件行真的进了组合结果。
+host 只在启动时组合 profile，客户端 bundle 的 URL 带内容哈希，所以**装完要重启 DSH Desktop**。
 
-```powershell
-node scripts/install.mjs --dry-run   # 只打印将要做什么
-node scripts/install.mjs --revert    # 卸载（保留客户端 bundle 与依赖链接）
-```
+## 功能特性
+
+| 功能 | 说明 | 依赖 |
+|---|---|---|
+| 任务主视图 | 与原生「对话」并列的独立视图，把扁平对话重组为「回合 → 任务阶段 → 任务列表快照 → 子任务 → 处理过程」 | DSH 会话存储（只读） |
+| 任务列表快照 | 每次 `todo_write` 冻结一份列表；最新一版默认展开，被接管的旧版自动折叠并显示「已停止」 | 模型的 `todo_write` 调用 |
+| 原生叶子 | 命令卡 / 文件差异 / 读取搜索 / 提问卡 / 思考行全部经 `conversation.chat.node` 交给核心渲染，本插件只画层级 | DSH 原生节点条目 |
+| 过程折叠统计 | 「思考中 / 思考完成」块折叠时显示「思考 x 次 · 执行 y 条命令 · 读取 w 个文件 · 编辑 z 个文件…」，0 值不显示 | 工具调用事件 |
+| 对用户输出协议 | 模型只在四个时机说话：任务开始、输出计划、需要审批、任务结束 | 系统提示分区 + 回合首步提醒 |
+| 回合导轨与分页 | 右侧刻度跳转（未加载刻度点击即加载），触顶自动加载更早历史且不跳动 | 会话时间线 |
+| 折叠状态记忆 | 展开收起按会话记进 localStorage，刷新后不还原；不可用时降级为页面内存 | 浏览器 localStorage |
+
+## 项目简介
+
+这是一个 **DSH 双面孔包插件**（host + client）：
+
+- **host 半侧**（`lib/index.js` + `lib/protocol.js`）只做两件事——把「对用户输出」协议注册成系统提示分区、
+  在每个回合的第一步注入一次规划提醒；
+- **client 半侧**（`lib/client/*.js`）是一个独立视图：**层级自己画，叶子交给核心**。
+  派生层（`20-derive.js`）从 `useChat` 快照纯函数地推导出回合分组、任务快照分段、子任务归属与统计，
+  渲染层把每一行节点经插槽交给核心的原生条目，原生条目缺席或渲染失败时退化成自绘卡片。
+
+技术栈：纯 JavaScript（ESM）、React（DSH 平台内置）、Node 内置模块；无构建工具、无转译、无第三方运行时依赖。
+客户端必须交付成单文件 bundle（DSH 只按 `exports["./client"]` 提供一个 URL），
+源码按 `lib/client/00-…99-` 分片、由脚本按文件名顺序拼接。
 
 ## 目录结构
 
@@ -44,28 +74,36 @@ test/                       node --test 测试
 cordis.patch.yml            bundle patch 层（安装即插入插件行）
 ```
 
-## 数据与配置
+## 从源码恢复开发环境
 
-本插件**不写任何宿主数据**：唯一的持久化是浏览器 localStorage 里的折叠状态
-（键名 `dsh-chat-flow.collapse.<sessionId>`），用于「刷新后展开/收起状态不还原」。
-localStorage 不可用时自动降级为当前页面内存。
-
-## 开发
+前提：Windows + 已安装 DSH Desktop + Node.js ≥ 20。无需 `npm install`（没有第三方依赖），
+`scripts/install.mjs` 会把所需的 `@deepseek-ai/*` 链接进本机 DSH 的 profile。
 
 ```powershell
 node scripts/build-client.mjs            # 改完 lib/client/*.js 必跑
 node scripts/build-client.mjs --check    # 校验产物与分片同步
-node --test                              # 全部测试
+node --test                              # 全部测试（当前 112 条）
+node scripts/install.mjs                 # 装进本机 DSH 并做组合校验
 ```
 
-客户端只能是单文件 bundle（DSH 只按 `exports["./client"]` 提供一个 URL），
-所以源码按 `lib/client/00-…99-` 分片、由脚本按文件名顺序拼接；没有转译、没有依赖解析。
+## 运行方式
 
-## 依赖
+装好后打开 DSH Desktop，用顶部标签切到「任务」即可；原生「对话」视图保持不动，两者并行。
+协议与提醒由 host 在会话装配时注入，对用户不可见。
 
-host 半侧只用 Node 内置模块与 `@deepseek-ai/*` peer（`dsh-llm`、`dsh-agent`、`dsh-system-prompt`、`cordis`）。
-客户端只用平台提供的模块表里的 `react` 与 `@deepseek-ai/dsh-client-ui-primitives`。
-**没有任何第三方运行时依赖。**
+## 配置位置
+
+本插件**不写任何宿主数据**：唯一的持久化是浏览器 localStorage 里的折叠状态
+（键名 `dsh-chat-flow.collapse.<sessionId>`），用于「刷新后展开/收起状态不还原」；
+localStorage 不可用时自动降级为当前页面内存。卸载用 `node scripts/install.mjs --revert`。
+
+## 开源引用
+
+| 项目 | 用途 | 链接 |
+|---|---|---|
+| DeepSeek DSH | 宿主与插件体系（`@deepseek-ai/*`） | https://www.deepseek.com |
+| Cline | 「计划 → 任务列表 → 折叠」交互形态参考 | https://github.com/cline/cline |
+| TRAE | 对话任务化体验参考 | https://www.trae.ai |
 
 ## 许可证
 

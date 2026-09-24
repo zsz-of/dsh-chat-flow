@@ -6,6 +6,18 @@
 **开发者**：zsz
 **版本**：v0.1.0
 
+## 许可证
+
+本程序基于 **GNU General Public License v3.0 (GPLv3)** 开源协议发布。
+
+Copyright (C) 2026 zsz
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+
+本程序分发时附带希望其有用的保证，但不提供任何担保；甚至不提供适销性或特定用途适用性的默示担保。详见 [LICENSE](LICENSE)。
+
+---
+
 ## 系统要求
 
 | 项目 | 要求 |
@@ -104,13 +116,3 @@ localStorage 不可用时自动降级为当前页面内存。卸载用 `node scr
 | DeepSeek DSH | 宿主与插件体系（`@deepseek-ai/*`） | https://www.deepseek.com |
 | Cline | 「计划 → 任务列表 → 折叠」交互形态参考 | https://github.com/cline/cline |
 | TRAE | 对话任务化体验参考 | https://www.trae.ai |
-
-## 许可证
-
-本程序基于 **GNU General Public License v3.0 (GPLv3)** 开源协议发布。
-
-Copyright (C) 2026 zsz
-
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-本程序分发时附带希望其有用的保证，但不提供任何担保；甚至不提供适销性或特定用途适用性的默示担保。详见 [LICENSE](LICENSE)。

@@ -22,6 +22,7 @@ import {
   pwshNode,
   steeringNode,
   subagentCallNode,
+  systemPromptNode,
   todoNode,
   toolNode,
   turnProcessNode,
@@ -496,6 +497,52 @@ test('第一个用户输入之前的节点不单独成组（最前端那个「�
   assert.equal(orphan.turns.length, 2, '没有输入气泡但有内容的组要保留')
   assert.equal(orphan.turns[0].input, undefined)
   assert.equal(orphan.turns[0].blank, false)
+})
+
+test('第一条用户消息之前的系统提示词/注入上下文并进第一回合（不再自成一个「无操作」块）', () => {
+  // 用户报告的现场：新对话最上面是一个「任务过程 · 无操作」的折叠头，展开后只有
+  // 「思考已完成 · 无操作」＋「上下文准备 → 注入系统提示词」——整组的内容就是一个
+  // `system-prompt` 节点。核心把它的 anchorSeq 排在第一条 `user/message` **之前**
+  // （本机实测 `turn/start` 是 seq 5、第一条用户消息是 seq 8）。
+  //
+  // 第十六轮只挡住了 `turn-process`（`isBlankNode` 认它），`system-prompt` 不认，
+  // 于是那一组「有内容」→ 不被过滤 → 幽灵块又回来了。
+  const merged = deriveFlow(
+    makeSnapshot([
+      systemPromptNode('sp1', 1, 1, '你是 DSH'),
+      turnProcessNode('tp1', 1, 2),
+      userNode('u1', 1, '干活'),
+      assistantNode('a1', 1, 1, [{ kind: 'reasoning', text: '想一下' }]),
+      pwshNode('t1', 1, 2, 'echo a', 'a'),
+    ]),
+  )
+  assert.equal(merged.turns.length, 1, '最前面不再多出一组')
+  assert.equal(merged.turns[0].input?.key, 'u1', '唯一的那一组就是第一回合')
+  assert.equal(merged.turns[0].blank, false)
+  // 并入的节点保持原有先后顺序，排在用户消息那一组的最前面：
+  // 系统提示词与它后面的注入上下文会被 `groupProcessNodes` 合成同一个「上下文准备」折叠体。
+  assert.deepEqual(
+    merged.turns[0].looseNodes.map((node) => node.key),
+    ['sp1', 'tp1', 'a1', 't1'],
+  )
+
+  // 注入上下文（`context`）同理：它本来就随第一回合的请求发出去。
+  const injected = deriveFlow(
+    makeSnapshot([
+      contextNode('c1', 1, 1, '工作区指令'),
+      userNode('u2', 2, '继续'),
+      assistantNode('a2', 2, 1, [{ kind: 'reasoning', text: '想一下' }]),
+    ]),
+  )
+  assert.equal(injected.turns.length, 1, '注入上下文也并进第一回合')
+  assert.deepEqual(injected.turns[0].looseNodes.map((node) => node.key), ['c1', 'a2'])
+
+  // ⚠️ 全窗口都没有用户发言时（历史分页正好从回合中间开始）仍要留住那一组，
+  // 否则并入逻辑会把攒下的节点整个吞掉。
+  const noUser = deriveFlow(makeSnapshot([systemPromptNode('sp9', 9, 1, '你是 DSH')]))
+  assert.equal(noUser.turns.length, 1, '没有用户发言的窗口退化成原来那个头组')
+  assert.equal(noUser.turns[0].input, undefined)
+  assert.equal(noUser.turns[0].blank, false)
 })
 
 test('「被打断」只看最后一个任务列表的状态（用户裁决）', () => {

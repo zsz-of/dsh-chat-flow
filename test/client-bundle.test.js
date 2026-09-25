@@ -1721,6 +1721,123 @@ test('快速回到底部：判据、滚动动作、样式与文案都在位', ()
   assert.equal(EN['flow.scrollToBottom'], 'Scroll to bottom')
 })
 
+/* ─────────────────── 切回会话：位置锚在节点行上，内容没铺开就逐帧重试 ─────────────────── */
+
+/** 一行带锚点 key 的节点行（只要 `visibleAnchorOf` 用到的两个接口）。 */
+function anchorRowFor(key, top) {
+  return {
+    getAttribute: (name) => (name === 'data-chat-anchor-key' ? key : null),
+    getBoundingClientRect: () => ({ top }),
+  }
+}
+
+/** 本视图根节点：`querySelectorAll` 返回当前已渲染的节点行。 */
+function anchorRootFor(rows) {
+  return { querySelectorAll: (selector) => (selector === '[data-chat-anchor-key]' ? rows : []) }
+}
+
+/** 滚动宿主（只要 `visibleAnchorOf` / `isAwayFromBottom` 用到的那几个字段）。 */
+function scrollHostFor(scrollTop, scrollHeight, clientHeight) {
+  return {
+    scrollTop,
+    scrollHeight,
+    clientHeight,
+    getBoundingClientRect: () => ({ top: 0 }),
+  }
+}
+
+test('切回会话：位置锚在视口顶部那一行节点上（不是死记像素）', () => {
+  const { readScrollState } = client.__internals
+  const root = anchorRootFor([anchorRowFor('n1', 120), anchorRowFor('n2', 400), anchorRowFor('n3', 900)])
+  const scroller = scrollHostFor(500, 2000, 600)
+
+  const state = readScrollState(root, scroller)
+  assert.equal(state.key, 'n1', '锚在视口顶部往下第一行')
+  assert.equal(state.offset, 120, '记住它离视口顶多远：窗口重新分页后像素会变，这一行的相对位置不会')
+  assert.equal(state.top, 500, '像素位置也留着，锚点行找不到时兜底')
+  assert.equal(state.atBottom, false)
+
+  assert.deepEqual(
+    readScrollState(anchorRootFor([]), scroller),
+    { atBottom: false, top: 500, key: null, offset: 0 },
+    '一行都没渲染出来时只剩像素',
+  )
+  assert.equal(readScrollState(null, scroller), null, '根节点不在时什么都不记')
+  assert.equal(readScrollState(root, null), null, '滚动宿主还没绑上时什么都不记')
+})
+
+test('恢复位置：锚点行出现前一直重试，出现后立刻钉住', () => {
+  const { applyScrollState, restoreScrollState, SCROLL_RESTORE_MAX_FRAMES } = client.__internals
+  const scroller = scrollHostFor(0, 3000, 600)
+  const state = { atBottom: false, top: 0, key: 'n1', offset: 30 }
+
+  // 内容还没进树：锚点行找不到、又没有像素兜底 → 「没钉住」，让调用方下一帧再来。
+  assert.equal(applyScrollState(anchorRootFor([]), scroller, state), false)
+  // 行出现了：把「这一行离视口顶的偏移」还原回去（90 - 30 = 60）。
+  assert.equal(applyScrollState(anchorRootFor([anchorRowFor('n1', 90)]), scroller, state), true)
+  assert.equal(scroller.scrollTop, 60)
+
+  // 锚点行不在了（窗口整批换掉）→ 退化成按像素还原，至少不比跳回顶部差。
+  const fallback = scrollHostFor(0, 3000, 600)
+  const stale = { atBottom: false, top: 640, key: 'gone', offset: 0 }
+  assert.equal(applyScrollState(anchorRootFor([]), fallback, stale), true)
+  assert.equal(fallback.scrollTop, 640)
+
+  const originalRaf = globalThis.requestAnimationFrame
+  const frames = []
+  globalThis.requestAnimationFrame = (fn) => frames.push(fn)
+  try {
+    let rows = []
+    const root = { querySelectorAll: () => rows }
+    const host = scrollHostFor(0, 3000, 600)
+    restoreScrollState(root, host, state)
+    assert.equal(host.scrollTop, 0, '第一帧锚点行还没进树，位置先不动')
+    assert.equal(frames.length, 1, '排了下一帧继续试')
+    rows = [anchorRowFor('n1', 807)]
+    frames.shift()()
+    assert.equal(host.scrollTop, 777, '行一出现就按锚点算像素')
+    assert.equal(frames.length, 0, '钉住之后不再排帧：不抢用户这期间的滚动')
+
+    // 一直找不到锚点行 → 重试到上限就放弃，不能无限排帧。
+    const stuck = { querySelectorAll: () => [] }
+    restoreScrollState(stuck, host, { atBottom: false, top: 0, key: 'nope', offset: 0 })
+    let scheduled = 0
+    while (frames.length > 0 && scheduled < SCROLL_RESTORE_MAX_FRAMES + 5) {
+      scheduled += 1
+      frames.shift()()
+    }
+    assert.equal(frames.length, 0, '到上限就停')
+    assert.equal(scheduled <= SCROLL_RESTORE_MAX_FRAMES, true, `重试不超过 ${SCROLL_RESTORE_MAX_FRAMES} 帧`)
+  } finally {
+    if (originalRaf === undefined) delete globalThis.requestAnimationFrame
+    else globalThis.requestAnimationFrame = originalRaf
+  }
+})
+
+test('「一进来就该在底部」与旧版位置记录：都还认得', () => {
+  const { applyScrollState, bottomScrollState, decodeScrollState, encodeScrollState, isDocumentVisible } = client.__internals
+
+  // 内容还没铺满一屏时「到底」是无意义的（被夹在 0）→ 不算钉住，下一帧再试。
+  const short = scrollHostFor(0, 400, 600)
+  assert.equal(applyScrollState(anchorRootFor([]), short, bottomScrollState()), false)
+  const tall = scrollHostFor(0, 4000, 600)
+  assert.equal(applyScrollState(anchorRootFor([]), tall, bottomScrollState()), true)
+  assert.equal(tall.scrollTop, 4000)
+
+  const state = { atBottom: true, top: 1234, key: 'n7', offset: 12 }
+  assert.deepEqual(decodeScrollState(encodeScrollState(state)), state)
+  // 旧版本存的就是一个数字（`String(scroller.scrollTop)`）：升级后不能把老记录读没了。
+  assert.deepEqual(decodeScrollState('1234'), { atBottom: false, top: 1234, key: null, offset: 0 })
+  assert.deepEqual(decodeScrollState('{"atBottom":true}'), { atBottom: true, top: 0, key: null, offset: 0 })
+  assert.equal(decodeScrollState('{坏 JSON'), null)
+  assert.equal(decodeScrollState(''), null)
+  assert.equal(decodeScrollState(null), null)
+  assert.equal(encodeScrollState(null), null)
+
+  // 没有 `document`（node 侧渲染）时按「可见」处理，不能因为读不到状态就抛。
+  assert.equal(isDocumentVisible(), true)
+})
+
 test('删除会话时清掉本插件留下的全部会话级数据（且不误伤前缀相同的会话）', () => {
   const { purgeSessionData, SESSION_KEY_PREFIXES } = client.__internals
   assert.deepEqual(SESSION_KEY_PREFIXES, [

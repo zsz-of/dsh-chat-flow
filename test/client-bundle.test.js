@@ -360,9 +360,16 @@ test('样式契约：折叠有过渡且收起时不可见，并尊重 reduced-mo
   assert.match(FLOW_CSS, /\.dcf-fold\[data-open=true\]\{[^}]*grid-template-rows:1fr/)
   assert.match(FLOW_CSS, /\.dcf-fold[^{]*\{[^}]*transition:grid-template-rows \.22s/)
   assert.match(FLOW_CSS, /prefers-reduced-motion:reduce/, '必须给减少动态效果留出口')
-  // 导轨：sticky 零高槽 + 刻度用主题 token 上色。
+  // 导轨：sticky 零高槽 + 刻度用主题 token 上色；刻度是装数字的方格（用户要求数字显示）。
   assert.match(FLOW_CSS, /\.dcf-rail-slot\{position:sticky;top:0/)
-  assert.match(FLOW_CSS, /\.dcf-mark\[data-active=true\]::before\{background:var\(--dsw-alias-label-primary\)/)
+  assert.match(FLOW_CSS, /\.dcf-rail\{[^}]*overflow-y:auto/, '刻度多了导轨自己滚')
+  assert.match(FLOW_CSS, /\.dcf-mark\{[^}]*display:flex[^}]*align-items:center[^}]*justify-content:center/, '刻度要能居中放数字')
+  assert.match(FLOW_CSS, /\.dcf-mark\[data-active=true\]\{[^}]*border-color:var\(--dsw-alias-label-primary\)/)
+  assert.equal(
+    /\.dcf-mark::before|\.dcf-mark\[data-[a-z]+=true\]::before/.test(FLOW_CSS),
+    false,
+    '横线形状已经让给数字了，旧的 ::before 规则必须清干净',
+  )
 })
 
 test('缺少 useChat（ui-chat 不在装配里）时给空态而不是抛异常', () => {
@@ -1652,12 +1659,43 @@ test('导轨默认高亮最后一个回合（视图侧接线）', () => {
     useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
   })
 
-  const marks = preorderOf(tree).filter((element) => String(element.props?.className ?? '').includes('dcf-mark'))
+  const marks = preorderOf(tree).filter((element) => element.props?.className === 'dcf-mark')
   assert.equal(marks.length, 2, '两个回合两个刻度')
+  assert.deepEqual(marks.map((element) => collectText(element)), ['1', '2'], '刻度上写的是回合号数字')
   const active = marks.filter((element) => element.props['data-active'] === 'true')
   assert.equal(active.length, 1, '同时只有一个刻度是 active')
   assert.equal(active[0].props['aria-label'], '跳到第 2 轮', '默认落在最后一轮，而不是第一轮')
   assert.equal(active[0].props['aria-current'], 'true', '无障碍上也标出当前回合')
+})
+
+test('导轨滚到底：默认停在顶部就看不见最后一格', () => {
+  const { scrollRailToBottom } = client.__internals
+  const rail = { scrollTop: 0, scrollHeight: 720 }
+  scrollRailToBottom(rail)
+  assert.equal(rail.scrollTop, 720, '滚到最底，最后一格（当前回合）才露出来')
+  assert.doesNotThrow(() => scrollRailToBottom(null), '导轨还没挂上时静默跳过')
+  assert.doesNotThrow(() => scrollRailToBottom(undefined), '拿不到导轨也不炸')
+})
+
+test('加载中的刻度：数字让位给转圈，但回合号仍在无障碍文案里', () => {
+  const { views, ZH } = client.__internals
+  const t = (key, params) => (params === undefined ? ZH[key] ?? key : (ZH[key] ?? key).replace(/\{(\w+)\}/g, (m, name) => String(params[name])))
+  const tree = views.TurnRail({
+    items: [
+      { turn: 1, loaded: true, seq: 1 },
+      { turn: 2, loaded: false, seq: 2 },
+    ],
+    activeTurn: 2,
+    liveTurn: null,
+    busyTurn: 2,
+    onJump: () => {},
+    t,
+  })
+  const marks = preorderOf(tree).filter((element) => element.props?.className === 'dcf-mark')
+  assert.equal(marks[1].props['data-busy'], 'true')
+  assert.equal(findElement(marks[1], (element) => element.props?.className === 'dcf-spinner') !== undefined, true, '加载中显示转圈')
+  assert.equal(marks[1].props['aria-busy'], 'true')
+  assert.equal(marks[1].props['aria-label'], '加载并跳到第 2 轮', '数字让位了，但屏幕阅读器仍能听到第几轮')
 })
 
 test('快速回到底部：判据、滚动动作、样式与文案都在位', () => {

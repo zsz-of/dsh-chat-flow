@@ -5,7 +5,8 @@
  * 1. **先重建客户端 bundle**——绝不出现「源码改了但线上还跑旧 bundle」；
  * 2. 建两条 junction：插件源码进 `<profile>/node_modules/<包名>`，
  *    以及开发态的 `@deepseek-ai` 依赖链接（host 半侧只用 peer，靠这条链接解析）；
- * 3. 把包名写进 profile `package.json` 的 `dependencies` 与 `dsh.profile.bundles`，
+ * 3. 把包名写进 profile `package.json` 的 `dependencies`（spec 用 `link:`，理由见 `dependencySpec()`）
+ *    与 `dsh.profile.bundles`，
  *    然后跑 `dsh --profile <p> --dump-config` **断言插件行真的进了组合结果**——
  *    脏配置绝不留给重启后的桌面壳去踩。
  *
@@ -35,6 +36,27 @@ const SOURCE = resolve(HERE, '..')
 const PACKAGE_NAME = 'dsh-chat-flow'
 /** cordis 插件行 id，必须与 `cordis.patch.yml` 的 insert 行 id 逐字一致（校验靠它断言）。 */
 const PLUGIN_ID = 'chat-flow'
+
+/**
+ * profile `dependencies` 里本插件该写的 spec。
+ *
+ * **必须是 `link:`，不能是 `file:`。** 桌面壳 bundled 的 pnpm（10.x）把**绝对路径**的 `file:`
+ * spec 当相对路径拼接，于是 `file:D:/Code/Program/DSH-Chat-Flow/Source` 在 `profiles/web`
+ * 里被解析成 `<profile>\D:\Code\Program\DSH-Chat-Flow\Source`，`pnpm install` 当场
+ * `ENOENT: no such file or directory, scandir '<profile>\D:\...'`（退出码 -4058）。
+ * 桌面壳每个 profile 维护周期都跑这步，失败会让它连市场基线一起放弃：
+ * `market baseline could not be established` → `Profile recovery requires Safe Mode`。
+ * 故障出在 spec 写法，与插件代码无关，所以修在这里而不是让用户去点安全模式。
+ *
+ * 实测（bundled pnpm 10.34.5，scratch profile）：`file:D:/…`、`file:///D:/…`、`file://D:/…`、
+ * 反斜杠形式**全部 ENOENT**；`link:D:/…` 成功建出 junction 且可重复安装。
+ * 桌面壳给 generation 插件写的 `pnpm.overrides` 用的也是 `link:`，是生态里的既有写法。
+ *
+ * @returns `link:<posix 绝对路径>`。
+ */
+function dependencySpec() {
+  return `link:${SOURCE.replace(/\\/g, '/')}`
+}
 
 /**
  * 解析命令行参数。
@@ -183,7 +205,7 @@ if (!options.dryRun) {
   if (!bundles.includes(PACKAGE_NAME)) bundles.push(PACKAGE_NAME)
   packageJson.dsh.profile.bundles = bundles
   packageJson.dependencies = packageJson.dependencies ?? {}
-  packageJson.dependencies[PACKAGE_NAME] = `file:${SOURCE.replace(/\\/g, '/')}`
+  packageJson.dependencies[PACKAGE_NAME] = dependencySpec()
   await writeFile(packageJsonPath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
   console.log(`· profile 接线：${packageJsonPath}`)
 }

@@ -45,6 +45,9 @@ node scripts/install.mjs --revert   # 卸载
 脚本做三件事：把仓库目录以 junction 链接进 `<harness>/profiles/web/node_modules/dsh-chat-flow`、
 在 profile 的 `package.json` 里加入依赖与 `dsh.profile.bundles` 条目、最后跑
 `dsh --profile web --dump-config` 断言插件行真的进了组合结果。
+profile 里的依赖必须写成 `link:<绝对路径>` 而不是 `file:`：桌面壳 bundled 的 pnpm 10 会把绝对 `file:`
+当成相对路径拼在 profile 目录后面并 `ENOENT`，这条错误会让整个 profile 维护失败并进安全模式
+（实测矩阵与机制见 `scripts/install.mjs` 的 `dependencySpec()`，规格由 `test/install-spec.test.js` 锁住）。
 host 只在启动时组合 profile，客户端 bundle 的 URL 带内容哈希，所以**装完要重启 DSH Desktop**。
 
 ## 功能特性

@@ -266,7 +266,7 @@ test('SSR：任务列表默认展开；任务过程与思考块默认收起', (t
   assert.match(live, /dcf-thinking"[^>]*>[\s\S]{0,400}?aria-expanded="false"/, '思考块默认收起')
 
   // 回合结束（有收尾节点）但任务仍未完成：那一项「进行中」的子任务保持展开；
-  // 「任务过程」本身仍然是收起的，并把「未完成」标在折叠头上。
+  // 「任务过程」本身仍然是收起的，折叠头上只写**中性**提示（清单陈旧 ≠ 被打断）。
   const settledButUnfinished = render(
     makeSnapshot([
       userNode('u1', 1, '干活'),
@@ -281,7 +281,16 @@ test('SSR：任务列表默认展开；任务过程与思考块默认收起', (t
   )
   assert.match(settledButUnfinished, /data-status="in_progress"/)
   assert.match(settledButUnfinished, /aria-expanded="true"/)
-  assert.match(settledButUnfinished, /被打断/, '半途停下的回合标「被打断」，不再写「未完成」')
+  assert.match(
+    settledButUnfinished,
+    /data-tone="muted">清单未走完</,
+    '清单没收尾只是中性提示（muted），不报警',
+  )
+  assert.equal(
+    settledButUnfinished.includes('被打断'),
+    false,
+    '没有真实中断证据就写「被打断」＝用户报的误报（对话完成了却显示被打断）',
+  )
 
   // 全部完成后：任务行与「正在处理」都自动收起。
   const done = render(

@@ -14,7 +14,7 @@ import { createFakeScroller, createProbeReact } from './helpers/probe-react.mjs'
 
 const { react, mount } = createProbeReact()
 const { exports } = await loadBundle({ react })
-const { useScroller, TOP_LOAD_THRESHOLD_PX } = exports.__internals
+const { useScroller, TOP_LOAD_THRESHOLD_PX, MAX_CATCHUP_PAGES } = exports.__internals
 
 /**
  * 手动驱动的 `requestAnimationFrame`：把回调排队，由测试决定什么时候走一帧。
@@ -56,16 +56,24 @@ function installFrames() {
  *
  * @param options - `turns`、`hasMore`、`loadingOlder`、`loadOlder`。
  * @param scrollerOptions - 假滚动宿主的初始状态。
- * @returns `{harness, fake, calls}`。
+ * @returns `{harness, fake, calls, through, state}`：`calls` 是 `loadOlder` 的调用记录，
+ *   `through` 是 `loadThrough` 收到的 seq 列表（导轨跳转用）。
  */
 function probeScroller(options, scrollerOptions = {}) {
   const fake = createFakeScroller(scrollerOptions)
   const rootRef = { current: fake.root }
   const calls = []
+  const through = []
   const state = {
     hasMore: options.hasMore ?? true,
     loadingOlder: options.loadingOlder ?? false,
+    // 真机上注入层的 `loadOlder` 返回核心的 promise（永不 reject）；单测里的桩返回 undefined，
+    // 两条路径都要走得通（`useScroller` 只把它当「可以再算一次」的信号）。
     loadOlder: () => calls.push(fake.scroller.scrollTop),
+    loadThrough: (seq) => {
+      through.push(seq)
+      return Promise.resolve()
+    },
     turns: options.turns ?? [1, 2],
     /** 窗口头 seq：加载历史时它会变小，锚定补偿只在「真的前插了」时发生。 */
     firstSeq: options.firstSeq ?? 100,
@@ -73,7 +81,7 @@ function probeScroller(options, scrollerOptions = {}) {
   const harness = mount(function Probe() {
     return useScroller(rootRef, state)
   })
-  return { harness, fake, calls, state }
+  return { harness, fake, calls, through, state }
 }
 
 test('触顶（进入阈值内）时自动加载更早的历史', () => {
@@ -268,4 +276,81 @@ test('加载锚点在视口内才触发；锚点滚出视口后重新武装', ()
   outside.fake.setAnchorBottom(400)
   outside.fake.fire()
   assert.equal(outside.calls.length, 1, '锚点回到视口后加载一次')
+})
+
+/* ─────────────────── 补页：加载「成功但没有任何新内容」时继续翻 ─────────────────── */
+
+test('加载成功但窗口没有任何变化时自动补页，一有进展就停手', () => {
+  const { harness, fake, calls, state } = probeScroller({}, { scrollTop: 10 })
+  fake.fire()
+  assert.equal(calls.length, 1, '触顶先发一页')
+  // 核心的 `loadOlder()` 会「resolve 了但什么都没加载」（重复页被组装器按 seq 去重、
+  // 或注入层是静默 no-op）——窗口头与回合数都没变，所以视图必须继续补页，不能静默卡住。
+  harness.render()
+  harness.render()
+  harness.render()
+  assert.equal(calls.length, 4, '每一轮渲染发现「没有进展」就补一页')
+  // 这一页终于带来了新内容：窗口头前进 → 立刻停手。
+  state.firstSeq = 50
+  harness.render()
+  assert.equal(calls.length, 4, '有进展就不再补页（不把历史一次拉完）')
+})
+
+test('补页有硬预算：一直没进展也不会一路把所有历史拉完', () => {
+  const { harness, fake, calls } = probeScroller({}, { scrollTop: 10 })
+  fake.fire()
+  for (let round = 0; round < 20; round += 1) harness.render()
+  assert.equal(calls.length, 1 + MAX_CATCHUP_PAGES, '触顶那一页 + 有限的补页预算，用完就停')
+})
+
+test('补页期间用户滚下去读内容 → 立刻让位；回到顶部可以再来一轮', () => {
+  const { harness, fake, calls } = probeScroller({}, { scrollTop: 10, anchorBottom: 400, withAnchor: true })
+  fake.fire()
+  assert.equal(calls.length, 1)
+  harness.render()
+  assert.equal(calls.length, 2, '没进展就补一页')
+  // 用户往下读：加载锚点离开视口 → 补页立刻让位（不在用户没看顶部时偷偷加载）。
+  fake.setAnchorBottom(-200)
+  harness.render()
+  const afterGiveUp = calls.length
+  harness.render()
+  harness.render()
+  assert.equal(calls.length, afterGiveUp, '用户在看下面的内容时不再补页')
+  // 用户滚回顶部：算一次新的触顶，重新加载。
+  fake.setAnchorBottom(400)
+  fake.fire()
+  assert.equal(calls.length, afterGiveUp + 1, '回到顶部后可以再来一轮')
+})
+
+test('没有更早的历史时补页也一次都不该发', () => {
+  const { harness, fake, calls } = probeScroller({ hasMore: false }, { scrollTop: 10 })
+  fake.fire()
+  for (let round = 0; round < 6; round += 1) harness.render()
+  assert.equal(calls.length, 0)
+})
+
+/* ─────────────────── 导轨跳转：窗口头未知时也要有界重试 ─────────────────── */
+
+test('点未加载的刻度：窗口头取不到时也会再翻页（不再静默放弃）', () => {
+  // `firstSeq === null`（窗口里一个节点都没有、或首节点没有 anchorSeq）是核心的合法状态：
+  // 旧版本在落位里直接跳过「再翻一次」这条路，于是这种会话点刻度毫无反应。
+  const { harness, through } = probeScroller({ firstSeq: null }, { scrollTop: 200 })
+  harness.value.onJump({ turn: 9, seq: 40, loaded: false })
+  harness.render()
+  assert.deepEqual(through, [40, 40], 'onJump 自己发一次，落位时发现窗口头未知再补翻一次')
+})
+
+test('跳转翻页后仍找不到那个回合：留一条 warn 线索，不静默当成功', () => {
+  const warnings = []
+  const original = console.warn
+  console.warn = (...args) => warnings.push(args)
+  try {
+    const { harness } = probeScroller({ firstSeq: null, hasMore: false }, { scrollTop: 200 })
+    harness.value.onJump({ turn: 9, seq: 40, loaded: false })
+    harness.render()
+  } finally {
+    console.warn = original
+  }
+  assert.equal(warnings.length, 1, '找不到目标回合时必须留痕（真机上没有别的排查渠道）')
+  assert.match(String(warnings[0][0]), /跳转回合失败/)
 })

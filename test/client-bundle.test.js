@@ -14,6 +14,7 @@ import {
   assistantNode,
   blankAssistantNode,
   contextNode,
+  interruptedPwshNode,
   makeSnapshot,
   pwshNode,
   steeringNode,
@@ -902,6 +903,14 @@ test('视图层错误边界：本插件自己的渲染错误降级成错误摘�
   assert.equal(strip.props['data-dcf-error'], 'boom')
   assert.match(collectText(strip), /flow\.error\.title/)
 
+  // 重试按钮：没有它，一次瞬时异常（例如某个原生叶子在错误的时机抛错）会把整块视图锁死在
+  // 错误摘要上，用户只能刷新页面——「任务视图莫名变白且点不动」。
+  const retry = findElement(strip, (element) => element.props?.['data-dcf-error-retry'] === 'true')
+  assert.ok(retry !== undefined, '错误摘要必须带重试按钮')
+  assert.equal(typeof retry.props.onClick, 'function', '重试按钮要能点')
+  retry.props.onClick()
+  assert.equal(instance.state.failed, false, '点重试清掉失败态，子树重新挂载')
+
   const warnings = []
   const originalWarn = console.warn
   console.warn = (...args) => warnings.push(args)
@@ -1063,9 +1072,11 @@ test('「任务过程」跑动中默认展开且不允许关闭；任务结束�
 
 /* ──────────────────────────── 本轮（第十一轮）的行为 ──────────────────────────── */
 
-test('思考块只在**自己**被中断时写「被打断」，回合级的未收尾不会传染给它', () => {
+test('回合级「没走完」写中性提示，不写成「被打断」；思考块也不会被传染', () => {
   const { view, t } = bootView()
   // 一个「没善终」的回合：任务还是 in_progress，而且有后台子 agent 只回了 started 一行。
+  // 但**没有任何真实中断证据**（工具都跑完了、assistant-step 也不是 interrupted）——
+  // 旧版本在这里写「被打断」，正是用户报的「对话完成了却显示被打断」（回合级误报）。
   const childId = '11111111-2222-3333-4444-555555555555'
   const tree = view.component({
     sessionId: 'session-cutoff-scope',
@@ -1095,12 +1106,48 @@ test('思考块只在**自己**被中断时写「被打断」，回合级的未�
     )
     assert.match(collectText(head), /思考已完成/, '正常跑完的块写「思考已完成」')
   }
-  // 回合级的「被打断」标记仍然挂在「任务过程」折叠头上（那里才是说回合整体的地方）。
+  // 回合级的提示仍然挂在「任务过程」折叠头上（那里才是说回合整体的地方），但措辞是中性的：
+  // 清单没走完 ≠ 被打断（用户裁决：超时/结果未知/清单陈旧都不算被打断）。
   const stageRow = findElement(
     tree,
     (element) => String(element.props?.className ?? '').includes('dcf-row') && collectText(element).includes('任务过程'),
   )
-  assert.match(collectText(stageRow), /被打断/, '任务没做完 → 折叠头挂「被打断」')
+  assert.match(collectText(stageRow), /清单未走完/, '陈旧的任务清单只写中性提示')
+  assert.equal(collectText(stageRow).includes('被打断'), false, '没有真实中断证据，就不许写「被打断」')
+  const chip = findElement(
+    stageRow,
+    (element) => String(element.props?.className ?? '') === 'dcf-chip',
+  )
+  assert.ok(chip !== undefined, '折叠头要挂一枚状态徽标')
+  assert.equal(chip.props['data-tone'], 'muted', '中性提示用 muted 色调，不报警')
+})
+
+test('回合级「被打断」只在有真实中断证据时出现（工具被取消 → warn 色）', () => {
+  const { view, t } = bootView()
+  const tree = view.component({
+    sessionId: 'session-cutoff-true',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          todoNode('p1', 1, 1, [{ content: '任务A', status: 'completed' }]),
+          interruptedPwshNode('t1', 1, 2, 'sleep 999'),
+          assistantNode('a1', 1, 3, [{ kind: 'text', text: '停在这里。' }]),
+          turnTailNode('tt1', 1, 4),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+  const chips = preorderOf(tree).filter(
+    (element) =>
+      String(element.props?.className ?? '') === 'dcf-chip' && collectText(element).includes('被打断'),
+  )
+  assert.ok(chips.length > 0, '有真实中断证据（工具被取消）时回合级要写「被打断」')
+  assert.ok(
+    chips.some((chip) => chip.props['data-tone'] === 'warn'),
+    '真实中断是警示色（warn），不是中性色',
+  )
 })
 
 test('子 agent 只回了 started 一行时，回合不算「被打断」', () => {
@@ -1332,6 +1379,41 @@ test('任务结束后：只有最后一段正文（汇报）留在最外层', ()
     foldDepthsOf(tree, rowOf('先写个计划。')),
     [1],
     '同一回合里穿插写的正文（规划阶段那句）只收在折叠体里，不摆到最外层',
+  )
+})
+
+test('任务清单没收尾（最后一项仍 in_progress）时，结尾正文照样留在最外层', () => {
+  const { view, t } = bootView()
+  const rowOf = (needle) => (element) =>
+    String(element.props?.className ?? '').includes('dcf-leaf') && collectText(element).includes(needle)
+  const tree = view.component({
+    sessionId: 'session-midtext-stale-plan',
+    t,
+    useChat: (selector) =>
+      selector(
+        makeSnapshot([
+          userNode('u1', 1, '干活'),
+          assistantNode('a1', 1, 1, [{ kind: 'text', text: '先写个计划。' }]),
+          // 清单停在「进行中」：回合结束了，但最后一项没人去标 completed。
+          todoNode('p1', 1, 2, [{ content: '任务A', status: 'completed' }, { content: '任务B', status: 'in_progress' }]),
+          assistantNode('a2', 1, 3, [{ kind: 'text', text: '任务B 先放着，总结如下。' }]),
+          turnTailNode('tt1', 1, 4),
+        ]),
+      ),
+    useSession: () => ({ hasMore: false, loadingOlder: false, running: false }),
+  })
+
+  // 旧版本的收尾提取带了 `last.activeIndex < 0` 的前置条件：清单只要还有一项 in_progress，
+  // 结尾正文就留在「任务过程」折叠体内——用户报的「总结显示在任务过程里面」。
+  assert.deepEqual(
+    foldDepthsOf(tree, rowOf('任务B 先放着，总结如下。')),
+    [0],
+    '收尾汇报是否留在最外层，只看它是不是结尾那段正文，与清单有没有标完无关',
+  )
+  assert.deepEqual(
+    foldDepthsOf(tree, rowOf('先写个计划。')),
+    [1],
+    '规划阶段那句仍然只在折叠体里',
   )
 })
 

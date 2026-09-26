@@ -583,6 +583,53 @@ test('「被打断」只看最后一个任务列表的状态（用户裁决）',
   assert.equal(stuck.unfinished, true, '最后一个列表里那一项还在进行中 → 被打断')
 })
 
+test('收尾正文与清单走没走完无关：最后一项还挂着 in_progress 也照样摘进 closing', () => {
+  // 用户报的「总结显示在任务过程里面」：旧版本的收尾提取带 `last.activeIndex < 0` 前置条件，
+  // 只要最后一个清单还有一项没标完成，结尾那段汇报就留在分段里 → 渲染进「任务过程」折叠体。
+  const group = deriveFlow(
+    makeSnapshot([
+      userNode('u1', 1, '干活'),
+      assistantNode('a1', 1, 1, [{ kind: 'text', text: '先写个计划。' }]),
+      todoNode('p1', 1, 2, [
+        { content: '任务A', status: 'completed' },
+        { content: '任务B', status: 'in_progress' },
+      ]),
+      pwshNode('t1', 1, 3, 'echo a', 'a'),
+      assistantNode('a2', 1, 4, [{ kind: 'text', text: '任务B 先放着，总结如下。' }]),
+      turnTailNode('tt1', 1, 5),
+    ]),
+  ).turns[0]
+
+  assert.equal(group.unfinished, true, '最后一个清单仍有进行中 → unfinished（中性提示用）')
+  assert.equal(group.cutOff, false, '没有真实中断证据 → 不算被打断')
+  assert.deepEqual(group.closing.map((node) => node.key), ['a2'], '结尾正文照样摘出来，与清单状态无关')
+  assert.deepEqual(group.segments[0].nodes.map((node) => node.key), ['t1'], '结尾正文不再留在分段里')
+  assert.deepEqual(group.planNodes.map((node) => node.key), ['a1'], '规划阶段那句仍然在过程里')
+})
+
+test('回合级 cutOff 只在有真实中断证据时为真', () => {
+  const half = assistantNode('a1', 3, 1, [{ kind: 'text', text: '写了一半' }])
+  half.data.status = 'interrupted'
+  const interrupted = deriveFlow(
+    makeSnapshot([userNode('u3', 3, '干活'), half, turnTailNode('tt3', 3, 2)]),
+  ).turns[0]
+  assert.equal(interrupted.cutOff, true, 'assistant-step 被中断 → 回合级 cutOff')
+
+  const canceled = deriveFlow(
+    makeSnapshot([
+      userNode('u4', 4, '干活'),
+      interruptedPwshNode('t4', 4, 1, 'sleep 9'),
+      turnTailNode('tt4', 4, 2),
+    ]),
+  ).turns[0]
+  assert.equal(canceled.cutOff, true, '工具被取消 → 回合级 cutOff')
+
+  const plain = deriveFlow(
+    makeSnapshot([userNode('u5', 5, '干活'), pwshNode('t5', 5, 1, 'echo a', 'a'), turnTailNode('tt5', 5, 2)]),
+  ).turns[0]
+  assert.equal(plain.cutOff, false, '工具正常跑完 → 不算被打断')
+})
+
 test('分段被后续列表接管：superseded 标记与「已停止」的判据', () => {
   const group = deriveFlow(
     makeSnapshot([
